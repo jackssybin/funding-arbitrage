@@ -30,6 +30,7 @@ public class AtomicTransactionManager {
     private static final long RETRY_DELAY_MS = 1000;
 
     private final BinanceFuturesClient futuresClient;
+    private final SmartOrderExecutor smartOrderExecutor;  // 智能下单引擎
 
     // 事务状态
     public enum TxStatus {
@@ -80,19 +81,20 @@ public class AtomicTransactionManager {
         }
     }
 
-    public AtomicTransactionManager(BinanceFuturesClient futuresClient) {
+    public AtomicTransactionManager(BinanceFuturesClient futuresClient, SmartOrderExecutor smartOrderExecutor) {
         this.futuresClient = futuresClient;
+        this.smartOrderExecutor = smartOrderExecutor;
     }
 
     /**
      * 原子性开仓：现货买入 + 合约做空
-     * 要么都成功，要么都失败（失败自动回滚）
+     * 🔥 优化：并发发单，消除串行时间差导致的滑点
      */
     public TxResult atomicOpenPosition(String symbol, BigDecimal quantity) {
         log.info("");
         log.info("╔══════════════════════════════════════════════════════════╗");
         log.info("║           🛡️  开始原子性开仓事务                              ║");
-        log.info("║           现货买入 + 合约做空，要么都成，要么都不成           ║");
+        log.info("║     🔥 并发发单模式：现货 + 合约 同时发出，消除时间差滑点      ║");
         log.info("╚══════════════════════════════════════════════════════════╝");
         log.info("币种: {}, 数量: {}", symbol, quantity);
 
@@ -104,11 +106,27 @@ public class AtomicTransactionManager {
         result.operations.add(spotBuy);
         result.operations.add(futuresShort);
 
-        // 2. 执行操作1：现货买入
-        boolean spotOk = executeOperationWithRetry(spotBuy);
+        // ========== 🔥 并发执行：两笔订单同时发出，消除时间差 ==========
+        long startTime = System.currentTimeMillis();
+        java.util.concurrent.CompletableFuture<Boolean> spotFuture = 
+                java.util.concurrent.CompletableFuture.supplyAsync(() -> 
+                        executeOperationWithRetry(spotBuy));
+        java.util.concurrent.CompletableFuture<Boolean> futuresFuture = 
+                java.util.concurrent.CompletableFuture.supplyAsync(() -> 
+                        executeOperationWithRetry(futuresShort));
         
-        // 3. 执行操作2：合约做空
-        boolean futuresOk = executeOperationWithRetry(futuresShort);
+        // 等待都完成
+        try {
+            java.util.concurrent.CompletableFuture.allOf(spotFuture, futuresFuture).get(10, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.error("并发执行超时或异常: {}", e.getMessage());
+        }
+        
+        boolean spotOk = spotFuture.join();
+        boolean futuresOk = futuresFuture.join();
+        long timeUsed = System.currentTimeMillis() - startTime;
+        
+        log.info("⏱️  并发发单完成，耗时: {} ms (两笔订单几乎同时成交)", timeUsed);
 
         // 4. 判断结果
         if (spotOk && futuresOk) {
@@ -145,12 +163,13 @@ public class AtomicTransactionManager {
 
     /**
      * 原子性平仓：现货卖出 + 合约平空
+     * 🔥 优化：并发发单，消除时间差滑点
      */
     public TxResult atomicClosePosition(String symbol, BigDecimal quantity) {
         log.info("");
         log.info("╔══════════════════════════════════════════════════════════╗");
         log.info("║           🛡️  开始原子性平仓事务                              ║");
-        log.info("║           现货卖出 + 平合约空单，要么都成，要么都不成           ║");
+        log.info("║     🔥 并发发单模式：现货 + 合约 同时发出，消除时间差滑点      ║");
         log.info("╚══════════════════════════════════════════════════════════╝");
         log.info("币种: {}, 数量: {}", symbol, quantity);
 
@@ -161,8 +180,26 @@ public class AtomicTransactionManager {
         result.operations.add(spotSell);
         result.operations.add(futuresClose);
 
-        boolean spotOk = executeOperationWithRetry(spotSell);
-        boolean futuresOk = executeOperationWithRetry(futuresClose);
+        // ========== 🔥 并发执行 ==========
+        long startTime = System.currentTimeMillis();
+        java.util.concurrent.CompletableFuture<Boolean> spotFuture = 
+                java.util.concurrent.CompletableFuture.supplyAsync(() -> 
+                        executeOperationWithRetry(spotSell));
+        java.util.concurrent.CompletableFuture<Boolean> futuresFuture = 
+                java.util.concurrent.CompletableFuture.supplyAsync(() -> 
+                        executeOperationWithRetry(futuresClose));
+        
+        try {
+            java.util.concurrent.CompletableFuture.allOf(spotFuture, futuresFuture).get(10, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.error("并发执行超时或异常: {}", e.getMessage());
+        }
+        
+        boolean spotOk = spotFuture.join();
+        boolean futuresOk = futuresFuture.join();
+        long timeUsed = System.currentTimeMillis() - startTime;
+        
+        log.info("⏱️  并发发单完成，耗时: {} ms", timeUsed);
 
         if (spotOk && futuresOk) {
             result.status = TxStatus.SUCCESS;
@@ -203,27 +240,35 @@ public class AtomicTransactionManager {
                 
                 switch (op.type) {
                     case "SPOT_BUY":
-                        op.orderId = futuresClient.buySpot(op.symbol, op.quantity);
+                        // 🔥 使用智能下单：查深度，自动拆单
+                        java.util.List<String> buyOrderIds = smartOrderExecutor.smartBuy(op.symbol, op.quantity);
+                        op.orderId = String.join(",", buyOrderIds);
                         op.status = "SUCCESS";
-                        log.info("✅ 现货买入成功: orderId={}", op.orderId);
+                        log.info("✅ 现货买入成功: {} 笔订单", buyOrderIds.size());
                         return true;
                         
                     case "SPOT_SELL":
-                        op.orderId = futuresClient.sellSpot(op.symbol, op.quantity);
+                        // 🔥 使用智能下单
+                        java.util.List<String> sellOrderIds = smartOrderExecutor.smartSell(op.symbol, op.quantity);
+                        op.orderId = String.join(",", sellOrderIds);
                         op.status = "SUCCESS";
-                        log.info("✅ 现货卖出成功: orderId={}", op.orderId);
+                        log.info("✅ 现货卖出成功: {} 笔订单", sellOrderIds.size());
                         return true;
                         
                     case "FUTURES_SHORT":
-                        op.orderId = futuresClient.openShort(op.symbol, op.quantity);
+                        // 🔥 使用智能下单
+                        java.util.List<String> shortOrderIds = smartOrderExecutor.smartOpenShort(op.symbol, op.quantity);
+                        op.orderId = String.join(",", shortOrderIds);
                         op.status = "SUCCESS";
-                        log.info("✅ 合约做空成功: orderId={}", op.orderId);
+                        log.info("✅ 合约做空成功: {} 笔订单", shortOrderIds.size());
                         return true;
                         
                     case "FUTURES_CLOSE":
-                        op.orderId = futuresClient.closeShort(op.symbol, op.quantity);
+                        // 🔥 使用智能下单
+                        java.util.List<String> closeOrderIds = smartOrderExecutor.smartCloseShort(op.symbol, op.quantity);
+                        op.orderId = String.join(",", closeOrderIds);
                         op.status = "SUCCESS";
-                        log.info("✅ 合约平仓成功: orderId={}", op.orderId);
+                        log.info("✅ 合约平仓成功: {} 笔订单", closeOrderIds.size());
                         return true;
                 }
                 

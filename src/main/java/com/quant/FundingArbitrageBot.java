@@ -45,6 +45,8 @@ public class FundingArbitrageBot {
     private GridTrading gridTrading;
     private ExchangePrecision precision;           // 防线1: 精度对齐
     private AtomicTransactionManager txManager;     // 防线2: 原子性回滚
+    private SmartOrderExecutor smartOrderExecutor;  // 优化1: 智能下单（查深度拆单）
+    private MarginGuardian marginGuardian;         // 优化2: 保证金守护（自动划转防爆仓）
 
     // ========== 状态变量 ==========
     private final Map<String, Position> positions = new HashMap<>();  // 各币种持仓
@@ -101,8 +103,15 @@ public class FundingArbitrageBot {
                 precision.loadAllSymbolFilters();
             }
             
-            // 防线2: 原子性事务管理器
-            txManager = new AtomicTransactionManager(futuresClient);
+            // 优化1: 智能下单引擎（查盘口深度，自动拆单防滑点）
+            smartOrderExecutor = new SmartOrderExecutor(futuresClient, precision);
+            
+            // 防线2: 原子性事务管理器（集成智能下单）
+            txManager = new AtomicTransactionManager(futuresClient, smartOrderExecutor);
+
+            // 优化2: 保证金守护线程（极端插针自动划转防爆仓）
+            marginGuardian = new MarginGuardian(futuresClient);
+            marginGuardian.start();
 
             // 3. 初始化网格交易组件
             gridTrading = new GridTrading(futuresClient);
