@@ -128,24 +128,24 @@ java -jar target/funding-arbitrage-1.0-SNAPSHOT.jar
 
 ```
 ╔═════════════════════════════════════════════════════════════╗
-║           多币种资金费率套利机器人 v2.0 [增强版]              ║
-║    ✓ 多币种轮动   ✓ 杠杆优化   ✓ 自动移仓   ✓ 网格增强       ║
+║ 多币种资金费率套利机器人 v2.0 [增强版]                        ║
+║ ✓ 多币种轮动 ✓ 杠杆优化 ✓ 自动移仓 ✓ 网格增强                  ║
 ╚═════════════════════════════════════════════════════════════╝
 
 ┌───────────────────────────────────────────────────────┐
-│                   当前配置                                │
+│ 当前配置                                               │
 ├───────────────────────────────────────────────────────┤
-│ 监控币种:       [BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT, DOGEUSDT]
-│ 最大持仓数:     3 个币种
-│ 杠杆倍数:       3x
-│ 单仓位价值:     1000 USDT
-│ 开仓阈值:       0.050%
-│ 平仓阈值:       0.020%
-│ 移仓阈值:       0.030%
-│ 网格交易:       启用 ✓
-│ 网格层数:       5 层
-│ 网格间距:       0.30%
-│ 模拟模式:       开启 ✅
+│ 监控币种: [BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT, DOGEUSDT]
+│ 最大持仓数: 3 个币种
+│ 杠杆倍数: 3x
+│ 单仓位价值: 1000 USDT
+│ 开仓阈值: 0.050%
+│ 平仓阈值: 0.020%
+│ 移仓阈值: 0.030%
+│ 网格交易: 启用 ✓
+│ 网格层数: 5 层
+│ 网格间距: 0.30%
+│ 模拟模式: 开启 ✅
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -153,11 +153,15 @@ java -jar target/funding-arbitrage-1.0-SNAPSHOT.jar
 
 ```
 src/main/java/com/quant/
-├── Config.java             # 配置类（所有参数在这里）
-├── BinanceFuturesClient.java  # 币安合约 API 客户端
-├── FundingArbitrageBot.java   # 主策略机器人
-├── Position.java           # 持仓状态类
-└── GridTrading.java        # 网格交易模块
+├── Config.java                  # 配置类（所有参数在这里）
+├── BinanceFuturesClient.java    # 币安合约 API 客户端
+├── FundingArbitrageBot.java     # 主策略机器人
+├── Position.java                # 持仓状态类
+├── GridTrading.java             # 网格交易模块
+├── ExchangePrecision.java       # 精度对齐工具（防线1）
+├── AtomicTransactionManager.java # 原子事务管理器（防线2）
+├── SmartOrderExecutor.java      # 智能下单引擎（优化2）
+└── MarginGuardian.java          # 保证金守护线程（优化3）
 ```
 
 ## 📝 更新日志
@@ -167,6 +171,8 @@ src/main/java/com/quant/
 - ✅ 杠杆优化（按 USDT 价值计算仓位）
 - ✅ 自动移仓功能
 - ✅ 网格交易增强
+- ✅ 两道硬核安全防线
+- ✅ 三大实盘盈利优化
 - ✅ 完整的风控体系
 
 ### v1.0
