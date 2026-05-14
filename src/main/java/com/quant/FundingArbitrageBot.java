@@ -37,13 +37,30 @@ public class FundingArbitrageBot {
     private static final Logger log = LoggerFactory.getLogger(FundingArbitrageBot.class);
     private static final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    // ========== 费率阈值（P1 修复：考虑手续费）==========
-    // 单次开平仓手续费约 0.02% * 杠杆倍数，3倍就是 0.06%，两次就是 0.12%
-    // 至少要持仓 2-3 次结算才能回本，所以阈值不能太低
-    private static final BigDecimal MIN_FUNDING_RATE = new BigDecimal("0.00015");  // 0.015% 开仓阈值
-    private static final BigDecimal CLOSE_FUNDING_RATE = new BigDecimal("0.00008");  // 0.008% 平仓阈值
-    private static final BigDecimal SWITCH_THRESHOLD = new BigDecimal("0.0005");     // 0.05% 移仓阈值
-    private static final BigDecimal FEE_PER_TRADE = new BigDecimal("0.0006");        // 单次交易手续费成本（3倍杠杆）
+    // ========== 费率阈值（P1 修复：考虑实际手续费成本）==========
+    // 【实盘修正】：
+    // - Binance 合约市价 taker 手续费: 0.04%
+    // - 3倍杠杆后: 0.04% × 3 = 0.12% （单次开仓）
+    // - 开平两次: 0.12% × 2 = 0.24% （总成本）
+    // - 每次结算 8 小时，需要至少 3 次结算（24小时）才能覆盖手续费
+    // - 结论：开仓阈值必须远高于手续费成本！
+    private static final BigDecimal MIN_FUNDING_RATE = new BigDecimal("0.0005");   // 0.05% 开仓阈值（原来的3.3倍）
+    private static final BigDecimal CLOSE_FUNDING_RATE = new BigDecimal("0.0002");  // 0.02% 平仓阈值
+    private static final BigDecimal SWITCH_THRESHOLD = new BigDecimal("0.001");      // 0.1% 移仓阈值（原来的2倍）
+    private static final BigDecimal FEE_PER_TRADE = new BigDecimal("0.0012");        // 开平完整手续费 0.24%（原来的2倍）
+
+    // 持仓最短时间（小时）：至少持仓到下一个结算时间点
+    private static final int MIN_HOLDING_HOURS = 6;
+
+    // 止损比例：亏 5% 强制平仓
+    private static final BigDecimal STOP_LOSS_RATIO = new BigDecimal("0.05");
+
+    // 止盈比例：赚 10% 止盈（资金费率不会涨这么多，主要是极端行情）
+    private static final BigDecimal TAKE_PROFIT_RATIO = new BigDecimal("0.1");
+
+    // 费率有效性范围：正常资金费率在 [-1%, +1%]，超过这个范围的都是异常数据
+    private static final BigDecimal MAX_VALID_RATE = new BigDecimal("0.01");  // 1%
+    private static final BigDecimal MIN_VALID_RATE = new BigDecimal("-0.01"); // -1%
 
     // ========== 结算时间（币安 UTC 0, 8, 16 点 = 北京时间 8, 16, 24 点）
     private static final List<Integer> FUNDING_HOURS = Arrays.asList(0, 8, 16);  // UTC 时间
@@ -285,14 +302,24 @@ public class FundingArbitrageBot {
                         .multiply(new BigDecimal("1095"))
                         .multiply(new BigDecimal(Config.LEVERAGE))
                         .multiply(new BigDecimal("100"));
-                log.info("│   ✓ {}: {} {} (年化 {}%, 第 {} 次, 持仓 {}h, 已赚 {} USDT)",
+                
+                // P2 修复：显示浮盈浮亏
+                String pnlStr = "";
+                if (position.getUnrealizedPnlRatio() != null) {
+                    BigDecimal pnlPercent = position.getUnrealizedPnlRatio().multiply(new BigDecimal("100"));
+                    String pnlSign = pnlPercent.compareTo(BigDecimal.ZERO) >= 0 ? "+" : "";
+                    pnlStr = String.format(", 浮盈浮亏: %s%s%%", pnlSign, pnlPercent.setScale(2));
+                }
+                
+                log.info("│   ✓ {}: {} {} (年化 {}%, 第 {} 次, 持仓 {}h, 已赚 {} USDT{})",
                         position.getSymbol(),
                         position.getPositionSide(),
                         position.getPositionSize().setScale(4),
                         annualized.setScale(2),
                         position.getFundingCount(),
                         position.getHoldingHours(),
-                        position.getTotalFundingEarned().setScale(4));
+                        position.getTotalFundingEarned().setScale(4),
+                        pnlStr);
             }
         }
         if (holdCount == 0) {
@@ -314,12 +341,43 @@ public class FundingArbitrageBot {
         for (Position position : positions.values()) {
             if (!position.hasPosition()) continue;
 
-            BigDecimal currentRate = fundingRates.getOrDefault(position.getSymbol(), BigDecimal.ZERO);
+            String symbol = position.getSymbol();
+            BigDecimal currentRate = fundingRates.getOrDefault(symbol, BigDecimal.ZERO);
+
+            // P2 修复：实时更新浮盈浮亏
+            try {
+                BigDecimal currentPrice = exchangeClient.getCurrentPrice(symbol);
+                position.updateUnrealizedPnl(currentPrice);
+            } catch (Exception e) {
+                log.warn("更新 {} 盈亏失败: {}", symbol, e.getMessage());
+            }
+
+            // 检查费率是否低于平仓阈值
             if (currentRate.abs().compareTo(CLOSE_FUNDING_RATE) < 0) {
                 log.info("📉 {} 费率 {}% 低于平仓阈值，准备平仓...",
-                        position.getSymbol(),
+                        symbol,
                         currentRate.abs().multiply(new BigDecimal("100")).setScale(4));
-                closePosition(position.getSymbol());
+                closePosition(symbol);
+                currentPositions--;
+                continue;
+            }
+
+            // P2 修复：止损检查 - 强制平仓防止极端行情
+            if (position.isStopLossTriggered(STOP_LOSS_RATIO)) {
+                log.error("🚨 {} 触发止损！盈亏 {}%，强制平仓",
+                        symbol,
+                        position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2));
+                closePosition(symbol);
+                currentPositions--;
+                continue;
+            }
+
+            // P2 修复：止盈检查 - 大行情主动止盈离场
+            if (position.isTakeProfitTriggered(TAKE_PROFIT_RATIO)) {
+                log.info("🎯 {} 触发止盈！盈亏 {}%，主动平仓",
+                        symbol,
+                        position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2));
+                closePosition(symbol);
                 currentPositions--;
             }
         }
@@ -328,6 +386,13 @@ public class FundingArbitrageBot {
             String symbol = entry.getKey();
             BigDecimal rate = entry.getValue();
             Position position = positions.get(symbol);
+
+            // P2 修复：跳过无效的异常费率数据
+            if (rate.compareTo(MIN_VALID_RATE) < 0 || rate.compareTo(MAX_VALID_RATE) > 0) {
+                log.warn("⚠️ {} 费率 {}% 异常，跳过", symbol,
+                        rate.multiply(new BigDecimal("100")).setScale(4));
+                continue;
+            }
 
             if (rate.abs().compareTo(MIN_FUNDING_RATE) < 0) {
                 break;

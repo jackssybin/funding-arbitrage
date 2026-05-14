@@ -1,6 +1,5 @@
 package com.quant;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,7 +15,7 @@ import java.util.List;
  * 功能：
  * 1. 下单前查询 OrderBook（盘口深度）
  * 2. 如果深度不够，自动拆成多笔小单
- * 3. 支持开空(SELL)和开多(BUY)两个方向
+ * 3. 支持四个方向：开空/平空/开多/平多
  */
 public class SmartOrderExecutor {
 
@@ -36,38 +35,70 @@ public class SmartOrderExecutor {
         this.precision = precision;
     }
 
+    // ========== 四个方向的下单方法 ==========
+
     /**
      * 智能合约开空（SELL）- 正费率时用
      */
     public String smartOpenShort(String symbol, BigDecimal totalQuantity) throws IOException {
-        log.info("🤖 智能合约开空 {}: 总量 {}", symbol, totalQuantity);
-        return executeSmartOrders(symbol, totalQuantity, "SELL", "开空");
+        return executeSmartOrders(symbol, totalQuantity, "SELL", "开空", false);
+    }
+
+    /**
+     * 智能合约平空（BUY）- 平掉空单
+     */
+    public String smartCloseShort(String symbol, BigDecimal totalQuantity) throws IOException {
+        return executeSmartOrders(symbol, totalQuantity, "BUY", "平空", true);
     }
 
     /**
      * 智能合约开多（BUY）- 负费率时用
      */
     public String smartOpenLong(String symbol, BigDecimal totalQuantity) throws IOException {
-        log.info("🤖 智能合约开多 {}: 总量 {}", symbol, totalQuantity);
-        return executeSmartOrders(symbol, totalQuantity, "BUY", "开多");
+        return executeSmartOrders(symbol, totalQuantity, "BUY", "开多", false);
     }
 
     /**
-     * 执行智能下单，自动拆单
+     * 智能合约平多（SELL）- 平掉多单
      */
-    private String executeSmartOrders(String symbol, BigDecimal totalQuantity, String side, String sideName) throws IOException {
+    public String smartCloseLong(String symbol, BigDecimal totalQuantity) throws IOException {
+        return executeSmartOrders(symbol, totalQuantity, "SELL", "平多", true);
+    }
+
+    // ========== 核心执行逻辑 ==========
+
+    /**
+     * 执行智能下单，自动拆单
+     * 
+     * @param symbol 交易对
+     * @param totalQuantity 总数量
+     * @param side 方向：BUY/SELL
+     * @param sideName 中文名称
+     * @param isClose 是否是平仓
+     */
+    private String executeSmartOrders(String symbol, BigDecimal totalQuantity, 
+                                       String side, String sideName, boolean isClose) throws IOException {
+        log.info("🤖 智能合约{} {}: 总量 {}", sideName, symbol, totalQuantity);
+
         if (Config.SIMULATION_MODE) {
             log.info("[模拟模式] {} 成功: {}", sideName, symbol);
             return "SIM_" + System.currentTimeMillis();
         }
 
-        // OKX 当前还没有深度查询，直接一笔下
+        // OKX 暂时不做拆单，直接一笔下单（等之后适配深度查询）
         if (client instanceof OkxClient) {
-            if ("SELL".equals(side)) {
-                return client.openShort(symbol, totalQuantity);
+            if (isClose) {
+                if ("BUY".equals(side)) {
+                    return client.closeShort(symbol, totalQuantity);
+                } else {
+                    return client.closeLong(symbol, totalQuantity);
+                }
             } else {
-                // OKX 目前只有开空接口，用开空模拟（因为接口里只有 openShort）
-                return client.openShort(symbol, totalQuantity);
+                if ("SELL".equals(side)) {
+                    return client.openShort(symbol, totalQuantity);
+                } else {
+                    return client.openLong(symbol, totalQuantity);
+                }
             }
         }
 
@@ -76,10 +107,18 @@ public class SmartOrderExecutor {
 
         if (totalQuantity.compareTo(maxPerOrder) <= 0) {
             log.info("✅ 订单量 {} 小于盘口深度 {}，直接一笔成交", totalQuantity, maxPerOrder);
-            if ("SELL".equals(side)) {
-                return client.openShort(symbol, totalQuantity);
+            if (isClose) {
+                if ("BUY".equals(side)) {
+                    return client.closeShort(symbol, totalQuantity);
+                } else {
+                    return client.closeLong(symbol, totalQuantity);
+                }
             } else {
-                return client.openShort(symbol, totalQuantity);
+                if ("SELL".equals(side)) {
+                    return client.openShort(symbol, totalQuantity);
+                } else {
+                    return client.openLong(symbol, totalQuantity);
+                }
             }
         }
 
@@ -100,10 +139,18 @@ public class SmartOrderExecutor {
             log.info("📦 拆单 {}/?: {} 合约 {} {}", orderIndex, sideName, thisQty, symbol);
             
             String orderId;
-            if ("SELL".equals(side)) {
-                orderId = client.openShort(symbol, thisQty);
+            if (isClose) {
+                if ("BUY".equals(side)) {
+                    orderId = client.closeShort(symbol, thisQty);
+                } else {
+                    orderId = client.closeLong(symbol, thisQty);
+                }
             } else {
-                orderId = client.openShort(symbol, thisQty);
+                if ("SELL".equals(side)) {
+                    orderId = client.openShort(symbol, thisQty);
+                } else {
+                    orderId = client.openLong(symbol, thisQty);
+                }
             }
             orderIds.add(orderId);
 
@@ -128,8 +175,8 @@ public class SmartOrderExecutor {
      * 从盘口深度计算单笔最大下单量
      */
     private BigDecimal getMaxOrderQuantityFromDepth(String symbol, String side) throws IOException {
-        // 如果是 OKX 或 模拟模式，返回一个足够大的值（不拆单）
-        if (Config.SIMULATION_MODE || client instanceof OkxClient) {
+        // 如果是模拟模式，返回一个足够大的值（不拆单）
+        if (Config.SIMULATION_MODE) {
             return new BigDecimal("999999");
         }
 

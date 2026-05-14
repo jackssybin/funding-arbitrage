@@ -226,6 +226,64 @@ public class OkxClient implements ExchangeClient {
     }
 
     /**
+     * 合约开多（买入做多）- 负费率时用
+     * OKX 接口：POST /api/v5/trade/order
+     * side=buy, posSide=long, tdMode=isolated
+     */
+    @Override
+    public String openLong(String symbol, BigDecimal quantity) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            log.info("[模拟模式] OKX 合约做多 {} 数量 {}", symbol, quantity);
+            return "OKX_SIM_LONG_" + System.currentTimeMillis();
+        }
+
+        String instId = toOkxInstId(symbol);
+        String path = "/api/v5/trade/order";
+        String bodyStr = String.format(
+                "{\"instId\":\"%s\",\"tdMode\":\"isolated\",\"side\":\"buy\",\"posSide\":\"long\"," +
+                "\"ordType\":\"market\",\"sz\":\"%s\"}",
+                instId, quantity.toPlainString());
+
+        Request request = buildSignedRequest("POST", path, bodyStr);
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = checkResponse(response, "合约做多");
+            JsonNode json = mapper.readTree(body);
+            String ordId = json.get("data").get(0).get("ordId").asText();
+            log.info("✅ OKX 合约做多成功: orderId={}, sz={}", ordId, quantity);
+            return ordId;
+        }
+    }
+
+    /**
+     * 合约平多（卖出平仓）
+     * OKX 接口：POST /api/v5/trade/order
+     * side=sell, posSide=long, reduceOnly
+     */
+    @Override
+    public String closeLong(String symbol, BigDecimal quantity) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            log.info("[模拟模式] OKX 平多 {} 数量 {}", symbol, quantity);
+            return "OKX_SIM_CLOSE_LONG_" + System.currentTimeMillis();
+        }
+
+        String instId = toOkxInstId(symbol);
+        String path = "/api/v5/trade/order";
+        String bodyStr = String.format(
+                "{\"instId\":\"%s\",\"tdMode\":\"isolated\",\"side\":\"sell\",\"posSide\":\"long\"," +
+                "\"ordType\":\"market\",\"sz\":\"%s\"}",
+                instId, quantity.toPlainString());
+
+        Request request = buildSignedRequest("POST", path, bodyStr);
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = checkResponse(response, "平合约多单");
+            JsonNode json = mapper.readTree(body);
+            String ordId = json.get("data").get(0).get("ordId").asText();
+            log.info("✅ OKX 平多成功: orderId={}", ordId);
+            return ordId;
+        }
+    }
+
+    /**
      * 查询合约持仓数量
      * OKX 接口：GET /api/v5/account/positions?instId=BTC-USDT-SWAP
      */
