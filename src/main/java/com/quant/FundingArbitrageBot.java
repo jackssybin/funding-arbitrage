@@ -43,6 +43,8 @@ public class FundingArbitrageBot {
     // ========== 核心组件 ==========
     private BinanceFuturesClient futuresClient;
     private GridTrading gridTrading;
+    private ExchangePrecision precision;           // 防线1: 精度对齐
+    private AtomicTransactionManager txManager;     // 防线2: 原子性回滚
 
     // ========== 状态变量 ==========
     private final Map<String, Position> positions = new HashMap<>();  // 各币种持仓
@@ -90,7 +92,19 @@ public class FundingArbitrageBot {
                 throw new RuntimeException("合约API连接失败");
             }
 
-            // 2. 初始化网格交易组件
+            // 2. 初始化两道硬核防线
+            // 防线1: 精度对齐工具
+            precision = new ExchangePrecision(futuresClient);
+            if (Config.SIMULATION_MODE) {
+                precision.loadMockFilters();
+            } else {
+                precision.loadAllSymbolFilters();
+            }
+            
+            // 防线2: 原子性事务管理器
+            txManager = new AtomicTransactionManager(futuresClient);
+
+            // 3. 初始化网格交易组件
             gridTrading = new GridTrading(futuresClient);
 
             // 3. 初始化持仓对象
@@ -310,37 +324,52 @@ public class FundingArbitrageBot {
     }
 
     /**
-     * 开仓：设置杠杆 + 开合约空单 + 设置网格 [功能1 + 功能2 + 功能4]
+     * 开仓：两道硬核防线加持
+     * 防线1: 先进行精度对齐，避免 Filter failure
+     * 防线2: 原子性开仓，现货+合约要么都成，要么都不成，失败自动回滚
      */
     private void openPosition(String symbol, BigDecimal fundingRate) throws IOException {
         log.info("");
-        log.info("┌────────────────────────────────────────────┐");
-        log.info("│              🚀 开仓操作                     │");
-        log.info("└────────────────────────────────────────────┘");
+        log.info("┌──────────────────────────────────────────────────────────┐");
+        log.info("│              🚀 开仓操作 (双防线加持)                        │");
+        log.info("│  防线1: 精度对齐 ✓    防线2: 原子性事务 ✓                   │");
+        log.info("└──────────────────────────────────────────────────────────┘");
 
         try {
-            // 1. 设置杠杆 [功能2]
+            // 1. 设置杠杆
             futuresClient.setLeverage(symbol, Config.LEVERAGE);
 
             // 2. 获取当前价格，计算开仓数量
             BigDecimal currentPrice = futuresClient.getCurrentPrice(symbol);
             // 数量 = (仓位价值 * 杠杆) / 价格
-            BigDecimal quantity = Config.POSITION_VALUE_USDT
+            BigDecimal rawQuantity = Config.POSITION_VALUE_USDT
                     .multiply(BigDecimal.valueOf(Config.LEVERAGE))
-                    .divide(currentPrice, 6, RoundingMode.DOWN);
+                    .divide(currentPrice, 12, RoundingMode.DOWN);
 
             log.info("当前价格: {} USDT", currentPrice);
-            log.info("开仓数量: {} {}", quantity, symbol.replace("USDT", ""));
+            log.info("计算原始数量: {}", rawQuantity);
 
-            // 3. 合约做空
-            String futuresOrderId = futuresClient.openShort(symbol, quantity);
-            log.info("✅ 合约做空成功，订单ID: {}", futuresOrderId);
+            // ========== 防线1: 精度对齐 ==========
+            BigDecimal alignedQuantity = precision.alignQuantity(symbol, rawQuantity);
+            if (BigDecimal.ZERO.compareTo(alignedQuantity) >= 0) {
+                log.error("❌ 精度对齐后数量为0，无法开仓");
+                return;
+            }
+            log.info("✅ 精度对齐后: {} (原始: {})", alignedQuantity, rawQuantity);
 
-            // 4. 更新持仓状态
+            // ========== 防线2: 原子性开仓（现货+合约） ==========
+            AtomicTransactionManager.TxResult txResult = txManager.atomicOpenPosition(
+                    symbol, alignedQuantity);
+
+            if (!txResult.isSuccess()) {
+                throw new IOException("原子性开仓失败: " + txResult.message);
+            }
+
+            // 3. 更新持仓状态
             Position position = positions.get(symbol);
-            position.open(quantity, currentPrice, fundingRate);
+            position.open(alignedQuantity, currentPrice, fundingRate);
 
-            // 5. 设置网格交易 [功能4]
+            // 4. 设置网格交易
             if (Config.GRID_ENABLED) {
                 gridTrading.setupGrid(position, currentPrice);
             }
@@ -355,6 +384,7 @@ public class FundingArbitrageBot {
             log.info("");
             log.info("🎉 开仓完成！{} {} 倍杠杆，预计年化 {}%",
                     symbol, Config.LEVERAGE, annualized);
+            log.info("✅ 两道防线全部通过 ✓");
             log.info("");
 
         } catch (Exception e) {
@@ -364,13 +394,13 @@ public class FundingArbitrageBot {
     }
 
     /**
-     * 平仓：取消网格 + 平合约
+     * 平仓：同样双防线加持
      */
     private void closePosition(String symbol) throws IOException {
         log.info("");
-        log.info("┌────────────────────────────────────────────┐");
-        log.info("│              📉 平仓操作                     │");
-        log.info("└────────────────────────────────────────────┘");
+        log.info("┌──────────────────────────────────────────────────────────┐");
+        log.info("│              📉 平仓操作 (双防线加持)                        │");
+        log.info("└──────────────────────────────────────────────────────────┘");
 
         Position position = positions.get(symbol);
         if (!position.hasPosition()) {
@@ -383,11 +413,19 @@ public class FundingArbitrageBot {
                 gridTrading.cancelAllGridOrders(symbol);
             }
 
-            // 2. 平合约空单
-            String futuresOrderId = futuresClient.closeShort(symbol, position.getPositionSize());
-            log.info("✅ 合约平仓成功，订单ID: {}", futuresOrderId);
+            // ========== 精度对齐 ==========
+            BigDecimal alignedQuantity = precision.alignQuantity(
+                    symbol, position.getPositionSize());
 
-            // 3. 打印收益
+            // ========== 原子性平仓（现货+合约） ==========
+            AtomicTransactionManager.TxResult txResult = txManager.atomicClosePosition(
+                    symbol, alignedQuantity);
+
+            if (!txResult.isSuccess() && txResult.isDangerous()) {
+                throw new IOException("⚠️ 原子性平仓异常: " + txResult.message);
+            }
+
+            // 2. 打印收益
             log.info("💵 持仓期间资金费收益: {} USDT", 
                     position.getTotalFundingEarned().setScale(2, RoundingMode.HALF_UP));
             if (Config.GRID_ENABLED) {
@@ -395,7 +433,7 @@ public class FundingArbitrageBot {
                         position.getGridProfit().setScale(2, RoundingMode.HALF_UP));
             }
 
-            // 4. 更新持仓状态
+            // 3. 更新持仓状态
             position.close();
 
             log.info("");

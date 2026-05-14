@@ -490,4 +490,90 @@ public class BinanceFuturesClient {
             return false;
         }
     }
+
+    // ==================== 现货API ====================
+    
+    /**
+     * 现货买入
+     */
+    public String buySpot(String symbol, BigDecimal quantity) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            log.info("[模拟模式] 现货买入 {}: 数量 {}", symbol, quantity);
+            return "SIM_SPOT_BUY_" + System.currentTimeMillis();
+        }
+
+        long timestamp = System.currentTimeMillis();
+        String params = "symbol=" + symbol +
+                "&side=BUY" +
+                "&type=MARKET" +
+                "&quantity=" + quantity +
+                "&timestamp=" + timestamp;
+
+        String signature = sign(params);
+        String url = "https://api.binance.com/api/v3/order?" + params + "&signature=" + signature;
+
+        okhttp3.RequestBody body = okhttp3.RequestBody.create("", 
+                okhttp3.MediaType.parse("application/json"));
+        okhttp3.Request request = new okhttp3.Request.Builder()
+                .url(url)
+                .header("X-MBX-APIKEY", apiKey)
+                .post(body)
+                .build();
+
+        try (okhttp3.Response response = httpClient.newCall(request).execute()) {
+            String responseBody = response.body().string();
+            if (!response.isSuccessful()) {
+                throw new IOException("现货买入失败: " + responseBody);
+            }
+            JsonNode json = mapper.readTree(responseBody);
+            return json.get("orderId").asText();
+        }
+    }
+
+    /**
+     * 现货卖出
+     */
+    public String sellSpot(String symbol, BigDecimal quantity) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            log.info("[模拟模式] 现货卖出 {}: 数量 {}", symbol, quantity);
+            return "SIM_SPOT_SELL_" + System.currentTimeMillis();
+        }
+
+        long timestamp = System.currentTimeMillis();
+        String params = "symbol=" + symbol +
+                "&side=SELL" +
+                "&type=MARKET" +
+                "&quantity=" + quantity +
+                "&timestamp=" + timestamp;
+
+        String signature = sign(params);
+        String url = "https://api.binance.com/api/v3/order?" + params + "&signature=" + signature;
+
+        okhttp3.RequestBody body = okhttp3.RequestBody.create("", 
+                okhttp3.MediaType.parse("application/json"));
+        okhttp3.Request request = new okhttp3.Request.Builder()
+                .url(url)
+                .header("X-MBX-APIKEY", apiKey)
+                .post(body)
+                .build();
+
+        try (okhttp3.Response response = httpClient.newCall(request).execute()) {
+            String responseBody = response.body().string();
+            if (!response.isSuccessful()) {
+                throw new IOException("现货卖出失败: " + responseBody);
+            }
+            JsonNode json = mapper.readTree(responseBody);
+            return json.get("orderId").asText();
+        }
+    }
+
+    // ==================== 内部访问器 ====================
+    
+    public okhttp3.OkHttpClient getHttpClient() {
+        return httpClient;
+    }
+    
+    public com.fasterxml.jackson.databind.ObjectMapper getMapper() {
+        return mapper;
+    }
 }
