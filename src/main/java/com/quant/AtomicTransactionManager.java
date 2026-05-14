@@ -8,20 +8,14 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 /**
- * 原子性事务管理器 - 第二道硬核防线
+ * 原子性事务管理器 - 纯合约版本
  * 
- * 解决问题：
- * 现货买入和合约做空是两笔独立的 HTTP 请求。
- * 如果网络抖动导致只有一笔成功，将瞬间面临 100% 的现货裸多风险！
- * 
- * 实现机制：
- * 1. 两阶段执行：先记录所有操作，然后执行
- * 2. 操作日志：每一步都有状态记录
- * 3. 自动回滚：失败时，反向平仓已成功的操作
- * 4. 最大重试：失败后重试 N 次
- * 5. 终极防护：极端情况下发送警报（需要人工介入）
+ * 确保开仓/平仓操作的原子性
+ * P0 修复：砍掉现货，只保留合约操作
+ * P1 修复：并发下单，消除时间差滑点
  */
 public class AtomicTransactionManager {
 
@@ -29,26 +23,187 @@ public class AtomicTransactionManager {
     private static final int MAX_RETRY = 3;
     private static final long RETRY_DELAY_MS = 1000;
 
-    private final ExchangeClient futuresClient;
-    private final SmartOrderExecutor smartOrderExecutor;  // 智能下单引擎
+    private final ExchangeClient exchangeClient;
+    private final SmartOrderExecutor smartOrderExecutor;
 
-    // 事务状态
-    public enum TxStatus {
-        PENDING,      // 待执行
-        SUCCESS,      // 全部成功
-        PARTIAL,      // 部分成功（危险！）
-        FAILED,       // 全部失败
-        ROLLBACK_SUCCESS,  // 回滚成功
-        ROLLBACK_FAILED    // 回滚失败（极度危险！）
+    public AtomicTransactionManager(ExchangeClient exchangeClient, SmartOrderExecutor smartOrderExecutor) {
+        this.exchangeClient = exchangeClient;
+        this.smartOrderExecutor = smartOrderExecutor;
     }
 
-    // 单个操作
+    /**
+     * 原子性开仓 - 纯合约版本
+     * 
+     * @param symbol 交易对
+     * @param quantity 数量
+     * @param fundingRate 资金费率（决定方向）
+     * @return 开仓结果
+     */
+    public TxResult atomicOpenPosition(String symbol, BigDecimal quantity, BigDecimal fundingRate) {
+        log.info("");
+        log.info("┌──────────────────────────────────────────────────────────┐");
+        log.info("│              🚀 纯合约开仓操作                              │");
+        log.info("└──────────────────────────────────────────────────────────┘");
+
+        TxResult result = new TxResult();
+        String side = fundingRate.compareTo(BigDecimal.ZERO) >= 0 ? "SELL" : "BUY";
+        String sideName = fundingRate.compareTo(BigDecimal.ZERO) >= 0 ? "做空" : "做多";
+
+        log.info("币种: {}, 方向: {} (费率 {}%), 数量: {}", 
+                symbol, sideName, 
+                fundingRate.abs().multiply(new BigDecimal("100")).setScale(4),
+                quantity);
+
+        TxOperation operation = new TxOperation("FUTURES_OPEN", symbol, quantity);
+        result.operations.add(operation);
+
+        boolean success = executeOperationWithRetry(operation, side);
+
+        if (success) {
+            result.status = TxStatus.SUCCESS;
+            result.message = "✅ 合约开仓成功";
+            log.info("✅ 合约开仓成功");
+        } else {
+            result.status = TxStatus.FAILED;
+            result.message = "❌ 合约开仓失败: " + operation.errorMsg;
+            log.error("❌ {}", result.message);
+        }
+
+        logResult(result);
+        return result;
+    }
+
+    /**
+     * 原子性平仓 - 纯合约版本
+     */
+    public TxResult atomicClosePosition(String symbol, BigDecimal quantity, String currentSide) {
+        log.info("");
+        log.info("┌──────────────────────────────────────────────────────────┐");
+        log.info("│              📉 纯合约平仓操作                              │");
+        log.info("└──────────────────────────────────────────────────────────┘");
+        log.info("币种: {}, 数量: {}, 原方向: {}", symbol, quantity, currentSide);
+
+        TxResult result = new TxResult();
+        String closeSide = "LONG".equals(currentSide) ? "SELL" : "BUY";
+
+        TxOperation operation = new TxOperation("FUTURES_CLOSE", symbol, quantity);
+        result.operations.add(operation);
+
+        boolean success = executeOperationWithRetry(operation, closeSide);
+
+        if (success) {
+            result.status = TxStatus.SUCCESS;
+            result.message = "✅ 合约平仓成功";
+            log.info("✅ 合约平仓成功");
+        } else {
+            result.status = TxStatus.FAILED;
+            result.message = "❌ 合约平仓失败: " + operation.errorMsg;
+            log.error("❌ {}", result.message);
+        }
+
+        logResult(result);
+        return result;
+    }
+
+    /**
+     * 批量并行开仓 - 多币种同时开仓，极致速度
+     */
+    public List<TxResult> batchOpenPositions(List<OpenPositionRequest> requests) {
+        log.info("🚀 开始批量并行开仓，共 {} 个币种", requests.size());
+
+        List<CompletableFuture<TxResult>> futures = new ArrayList<>();
+
+        for (OpenPositionRequest request : requests) {
+            futures.add(CompletableFuture.supplyAsync(() ->
+                    atomicOpenPosition(request.symbol, request.quantity, request.fundingRate)));
+        }
+
+        List<TxResult> results = new ArrayList<>();
+        for (CompletableFuture<TxResult> future : futures) {
+            try {
+                results.add(future.get());
+            } catch (Exception e) {
+                log.error("批量开仓异常: {}", e.getMessage());
+            }
+        }
+
+        long successCount = results.stream().filter(TxResult::isSuccess).count();
+        log.info("📊 批量开仓完成: 成功 {}/{}", successCount, results.size());
+
+        return results;
+    }
+
+    /**
+     * 执行操作（带重试）
+     */
+    private boolean executeOperationWithRetry(TxOperation op, String side) {
+        for (int attempt = 1; attempt <= MAX_RETRY; attempt++) {
+            try {
+                log.info("执行 {} (第 {} 次尝试)...", op, attempt);
+
+                if ("FUTURES_OPEN".equals(op.type) || "FUTURES_CLOSE".equals(op.type)) {
+                    String orderId;
+                    if ("SELL".equals(side)) {
+                        orderId = smartOrderExecutor.smartOpenShort(op.symbol, op.quantity);
+                    } else {
+                        orderId = smartOrderExecutor.smartOpenLong(op.symbol, op.quantity);
+                    }
+                    op.orderId = orderId;
+                    op.status = "SUCCESS";
+                    log.info("✅ 订单执行成功: {}", orderId);
+                    return true;
+                }
+
+            } catch (Exception e) {
+                op.errorMsg = e.getMessage();
+                log.warn("❌ {} 失败 (第 {} 次): {}", op.type, attempt, e.getMessage());
+
+                if (attempt < MAX_RETRY) {
+                    try {
+                        Thread.sleep(RETRY_DELAY_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+        }
+
+        op.status = "FAILED";
+        log.error("❌ {} 重试 {} 次全部失败!", op.type, MAX_RETRY);
+        return false;
+    }
+
+    /**
+     * 打印事务结果
+     */
+    private void logResult(TxResult result) {
+        log.info("");
+        log.info("┌─────────────────────────────────────────────────────┐");
+        log.info("│              执行结果                                   │");
+        log.info("├─────────────────────────────────────────────────────┤");
+        for (TxOperation op : result.operations) {
+            String statusIcon = "SUCCESS".equals(op.status) ? "✅" : "❌";
+            log.info("│  {} {}", statusIcon, op);
+        }
+        log.info("│");
+        log.info("│  最终状态: {}", result.status);
+        log.info("│  {}", result.message);
+        log.info("└─────────────────────────────────────────────────────┘");
+        log.info("");
+    }
+
+    // ============ 内部类 ============
+
+    public enum TxStatus {
+        PENDING, SUCCESS, FAILED, PARTIAL, ROLLBACK_SUCCESS, ROLLBACK_FAILED
+    }
+
     public static class TxOperation {
         public String id;
-        public String type;        // SPOT_BUY, SPOT_SELL, FUTURES_SHORT, FUTURES_CLOSE
+        public String type;
         public String symbol;
         public BigDecimal quantity;
-        public String status;      // PENDING, SUCCESS, FAILED
+        public String status;
         public String orderId;
         public String errorMsg;
 
@@ -66,7 +221,6 @@ public class AtomicTransactionManager {
         }
     }
 
-    // 事务结果
     public static class TxResult {
         public TxStatus status;
         public List<TxOperation> operations = new ArrayList<>();
@@ -81,309 +235,15 @@ public class AtomicTransactionManager {
         }
     }
 
-    public AtomicTransactionManager(ExchangeClient futuresClient, SmartOrderExecutor smartOrderExecutor) {
-        this.futuresClient = futuresClient;
-        this.smartOrderExecutor = smartOrderExecutor;
-    }
+    public static class OpenPositionRequest {
+        public String symbol;
+        public BigDecimal quantity;
+        public BigDecimal fundingRate;
 
-    /**
-     * 原子性开仓：现货买入 + 合约做空
-     * 🔥 优化：并发发单，消除串行时间差导致的滑点
-     */
-    public TxResult atomicOpenPosition(String symbol, BigDecimal quantity) {
-        log.info("");
-        log.info("╔══════════════════════════════════════════════════════════╗");
-        log.info("║           🛡️  开始原子性开仓事务                              ║");
-        log.info("║     🔥 并发发单模式：现货 + 合约 同时发出，消除时间差滑点      ║");
-        log.info("╚══════════════════════════════════════════════════════════╝");
-        log.info("币种: {}, 数量: {}", symbol, quantity);
-
-        TxResult result = new TxResult();
-        
-        // 1. 定义两个操作
-        TxOperation spotBuy = new TxOperation("SPOT_BUY", symbol, quantity);
-        TxOperation futuresShort = new TxOperation("FUTURES_SHORT", symbol, quantity);
-        result.operations.add(spotBuy);
-        result.operations.add(futuresShort);
-
-        // ========== 🔥 并发执行：两笔订单同时发出，消除时间差 ==========
-        long startTime = System.currentTimeMillis();
-        java.util.concurrent.CompletableFuture<Boolean> spotFuture = 
-                java.util.concurrent.CompletableFuture.supplyAsync(() -> 
-                        executeOperationWithRetry(spotBuy));
-        java.util.concurrent.CompletableFuture<Boolean> futuresFuture = 
-                java.util.concurrent.CompletableFuture.supplyAsync(() -> 
-                        executeOperationWithRetry(futuresShort));
-        
-        // 等待都完成
-        try {
-            java.util.concurrent.CompletableFuture.allOf(spotFuture, futuresFuture).get(10, java.util.concurrent.TimeUnit.SECONDS);
-        } catch (Exception e) {
-            log.error("并发执行超时或异常: {}", e.getMessage());
+        public OpenPositionRequest(String symbol, BigDecimal quantity, BigDecimal fundingRate) {
+            this.symbol = symbol;
+            this.quantity = quantity;
+            this.fundingRate = fundingRate;
         }
-        
-        boolean spotOk = spotFuture.join();
-        boolean futuresOk = futuresFuture.join();
-        long timeUsed = System.currentTimeMillis() - startTime;
-        
-        log.info("⏱️  并发发单完成，耗时: {} ms (两笔订单几乎同时成交)", timeUsed);
-
-        // 4. 判断结果
-        if (spotOk && futuresOk) {
-            result.status = TxStatus.SUCCESS;
-            result.message = "✅ 原子性开仓成功，两笔订单都已成交";
-            log.info("✅ {}", result.message);
-        } else if (!spotOk && !futuresOk) {
-            result.status = TxStatus.FAILED;
-            result.message = "❌ 原子性开仓失败，两笔订单都未成交";
-            log.error("❌ {}", result.message);
-        } else {
-            // 部分成功！危险！必须回滚！
-            result.status = TxStatus.PARTIAL;
-            result.message = "⚠️ 原子性开仓部分成功，启动回滚...";
-            log.warn("{}", result.message);
-            
-            // 执行回滚
-            boolean rollbackOk = rollbackOpenPosition(result);
-            if (rollbackOk) {
-                result.status = TxStatus.ROLLBACK_SUCCESS;
-                result.message = "✅ 回滚成功，无单边敞口";
-                log.info("✅ {}", result.message);
-            } else {
-                result.status = TxStatus.ROLLBACK_FAILED;
-                result.message = "🚨 极度危险！回滚失败！存在单边敞口！请立即人工检查！";
-                log.error("🚨 {}", result.message);
-                // TODO: 这里可以集成飞书/钉钉/短信报警
-            }
-        }
-
-        logResult(result);
-        return result;
-    }
-
-    /**
-     * 原子性平仓：现货卖出 + 合约平空
-     * 🔥 优化：并发发单，消除时间差滑点
-     */
-    public TxResult atomicClosePosition(String symbol, BigDecimal quantity) {
-        log.info("");
-        log.info("╔══════════════════════════════════════════════════════════╗");
-        log.info("║           🛡️  开始原子性平仓事务                              ║");
-        log.info("║     🔥 并发发单模式：现货 + 合约 同时发出，消除时间差滑点      ║");
-        log.info("╚══════════════════════════════════════════════════════════╝");
-        log.info("币种: {}, 数量: {}", symbol, quantity);
-
-        TxResult result = new TxResult();
-        
-        TxOperation spotSell = new TxOperation("SPOT_SELL", symbol, quantity);
-        TxOperation futuresClose = new TxOperation("FUTURES_CLOSE", symbol, quantity);
-        result.operations.add(spotSell);
-        result.operations.add(futuresClose);
-
-        // ========== 🔥 并发执行 ==========
-        long startTime = System.currentTimeMillis();
-        java.util.concurrent.CompletableFuture<Boolean> spotFuture = 
-                java.util.concurrent.CompletableFuture.supplyAsync(() -> 
-                        executeOperationWithRetry(spotSell));
-        java.util.concurrent.CompletableFuture<Boolean> futuresFuture = 
-                java.util.concurrent.CompletableFuture.supplyAsync(() -> 
-                        executeOperationWithRetry(futuresClose));
-        
-        try {
-            java.util.concurrent.CompletableFuture.allOf(spotFuture, futuresFuture).get(10, java.util.concurrent.TimeUnit.SECONDS);
-        } catch (Exception e) {
-            log.error("并发执行超时或异常: {}", e.getMessage());
-        }
-        
-        boolean spotOk = spotFuture.join();
-        boolean futuresOk = futuresFuture.join();
-        long timeUsed = System.currentTimeMillis() - startTime;
-        
-        log.info("⏱️  并发发单完成，耗时: {} ms", timeUsed);
-
-        if (spotOk && futuresOk) {
-            result.status = TxStatus.SUCCESS;
-            result.message = "✅ 原子性平仓成功";
-            log.info("✅ {}", result.message);
-        } else if (!spotOk && !futuresOk) {
-            result.status = TxStatus.FAILED;
-            result.message = "❌ 原子性平仓失败";
-            log.error("❌ {}", result.message);
-        } else {
-            result.status = TxStatus.PARTIAL;
-            result.message = "⚠️ 原子性平仓部分成功，启动回滚...";
-            log.warn("{}", result.message);
-            
-            boolean rollbackOk = rollbackClosePosition(result);
-            if (rollbackOk) {
-                result.status = TxStatus.ROLLBACK_SUCCESS;
-                result.message = "✅ 回滚成功";
-                log.info("✅ {}", result.message);
-            } else {
-                result.status = TxStatus.ROLLBACK_FAILED;
-                result.message = "🚨 回滚失败！请立即人工检查！";
-                log.error("🚨 {}", result.message);
-            }
-        }
-
-        logResult(result);
-        return result;
-    }
-
-    /**
-     * 执行操作（带重试）
-     */
-    private boolean executeOperationWithRetry(TxOperation op) {
-        for (int attempt = 1; attempt <= MAX_RETRY; attempt++) {
-            try {
-                log.info("执行 {} (第 {} 次尝试)...", op, attempt);
-                
-                switch (op.type) {
-                    case "SPOT_BUY":
-                        // 🔥 使用智能下单：查深度，自动拆单
-                        java.util.List<String> buyOrderIds = smartOrderExecutor.smartBuy(op.symbol, op.quantity);
-                        op.orderId = String.join(",", buyOrderIds);
-                        op.status = "SUCCESS";
-                        log.info("✅ 现货买入成功: {} 笔订单", buyOrderIds.size());
-                        return true;
-                        
-                    case "SPOT_SELL":
-                        // 🔥 使用智能下单
-                        java.util.List<String> sellOrderIds = smartOrderExecutor.smartSell(op.symbol, op.quantity);
-                        op.orderId = String.join(",", sellOrderIds);
-                        op.status = "SUCCESS";
-                        log.info("✅ 现货卖出成功: {} 笔订单", sellOrderIds.size());
-                        return true;
-                        
-                    case "FUTURES_SHORT":
-                        // 🔥 使用智能下单
-                        java.util.List<String> shortOrderIds = smartOrderExecutor.smartOpenShort(op.symbol, op.quantity);
-                        op.orderId = String.join(",", shortOrderIds);
-                        op.status = "SUCCESS";
-                        log.info("✅ 合约做空成功: {} 笔订单", shortOrderIds.size());
-                        return true;
-                        
-                    case "FUTURES_CLOSE":
-                        // 🔥 使用智能下单
-                        java.util.List<String> closeOrderIds = smartOrderExecutor.smartCloseShort(op.symbol, op.quantity);
-                        op.orderId = String.join(",", closeOrderIds);
-                        op.status = "SUCCESS";
-                        log.info("✅ 合约平仓成功: {} 笔订单", closeOrderIds.size());
-                        return true;
-                }
-                
-            } catch (Exception e) {
-                op.errorMsg = e.getMessage();
-                log.warn("❌ {} 失败 (第 {} 次): {}", op.type, attempt, e.getMessage());
-                
-                if (attempt < MAX_RETRY) {
-                    try {
-                        Thread.sleep(RETRY_DELAY_MS);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                    }
-                }
-            }
-        }
-        
-        op.status = "FAILED";
-        log.error("❌ {} 重试 {} 次全部失败!", op.type, MAX_RETRY);
-        return false;
-    }
-
-    /**
-     * 回滚开仓操作：
-     * - 如果现货买成功了，就卖出现货
-     * - 如果合约空成功了，就平掉合约空单
-     */
-    private boolean rollbackOpenPosition(TxResult result) {
-        log.warn("🔄 开始回滚开仓操作...");
-        boolean allRolledBack = true;
-
-        for (TxOperation op : result.operations) {
-            if (!"SUCCESS".equals(op.status)) {
-                continue;
-            }
-
-            try {
-                log.warn("🔄 回滚 {}: 卖出已买入的现货/平掉已开的合约...", op);
-                
-                switch (op.type) {
-                    case "SPOT_BUY":
-                        futuresClient.sellSpot(op.symbol, op.quantity);
-                        log.info("✅ 现货买入已回滚（卖出）");
-                        break;
-                        
-                    case "FUTURES_SHORT":
-                        futuresClient.closeShort(op.symbol, op.quantity);
-                        log.info("✅ 合约做空已回滚（平仓）");
-                        break;
-                }
-                
-            } catch (Exception e) {
-                log.error("❌ 回滚 {} 失败: {}", op, e.getMessage());
-                allRolledBack = false;
-            }
-        }
-
-        return allRolledBack;
-    }
-
-    /**
-     * 回滚平仓操作：
-     * - 如果现货卖成功了，就买回现货
-     * - 如果合约平成功了，就重新开空
-     */
-    private boolean rollbackClosePosition(TxResult result) {
-        log.warn("🔄 开始回滚平仓操作...");
-        boolean allRolledBack = true;
-
-        for (TxOperation op : result.operations) {
-            if (!"SUCCESS".equals(op.status)) {
-                continue;
-            }
-
-            try {
-                switch (op.type) {
-                    case "SPOT_SELL":
-                        futuresClient.buySpot(op.symbol, op.quantity);
-                        log.info("✅ 现货卖出已回滚（买回）");
-                        break;
-                        
-                    case "FUTURES_CLOSE":
-                        futuresClient.openShort(op.symbol, op.quantity);
-                        log.info("✅ 合约平仓已回滚（重新开空）");
-                        break;
-                }
-                
-            } catch (Exception e) {
-                log.error("❌ 回滚 {} 失败: {}", op, e.getMessage());
-                allRolledBack = false;
-            }
-        }
-
-        return allRolledBack;
-    }
-
-    /**
-     * 打印事务结果
-     */
-    private void logResult(TxResult result) {
-        log.info("");
-        log.info("┌─────────────────────────────────────────────────────┐");
-        log.info("│              事务执行结果                              │");
-        log.info("├─────────────────────────────────────────────────────┤");
-        for (TxOperation op : result.operations) {
-            String statusIcon = "SUCCESS".equals(op.status) ? "✅" : "❌";
-            log.info("│  {} {}", statusIcon, op);
-        }
-        log.info("│");
-        log.info("│  最终状态: {}", result.status);
-        log.info("│  {}", result.message);
-        if (result.isDangerous()) {
-            log.error("│  🚨 危险！存在单边敞口风险！请立即人工检查！");
-        }
-        log.info("└─────────────────────────────────────────────────────┘");
-        log.info("");
     }
 }

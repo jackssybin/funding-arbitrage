@@ -15,8 +15,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 币安合约API客户端（实现 ExchangeClient 接口）
- * 完整实现：资金费率获取、合约下单、平仓、持仓查询
+ * 币安合约API客户端
+ * 完整实现:资金费率获取、合约下单、平仓、持仓查询
  */
 public class BinanceFuturesClient implements ExchangeClient {
 
@@ -38,22 +38,17 @@ public class BinanceFuturesClient implements ExchangeClient {
         this.baseUrl = Config.BINANCE_FUTURES_API;
     }
 
-    @Override
-    public String getExchangeName() {
-        return "Binance";
-    }
-
     /**
      * 获取所有交易对的资金费率 [功能1: 多币种轮动]
      */
     public java.util.Map<String, BigDecimal> getAllFundingRates(java.util.List<String> symbols) throws IOException {
         java.util.Map<String, BigDecimal> rates = new java.util.HashMap<>();
-        
+
         if (Config.SIMULATION_MODE) {
-            // 模拟模式：每个币种返回不同的随机费率，方便演示轮动效果
+            // 模拟模式:每个币种返回不同的随机费率,方便演示轮动效果
             for (int i = 0; i < symbols.size(); i++) {
                 String symbol = symbols.get(i);
-                // 不同币种有不同的费率基准，让轮动效果更明显
+                // 不同币种有不同的费率基准,让轮动效果更明显
                 double baseRate = 0.0001 + i * 0.0002;  // 从0.01%到0.09%
                 double randomVariation = (Math.random() - 0.5) * 0.0004;  // ±0.02%
                 BigDecimal rate = new BigDecimal(baseRate + randomVariation).setScale(6, RoundingMode.HALF_UP);
@@ -69,10 +64,10 @@ public class BinanceFuturesClient implements ExchangeClient {
             if (!response.isSuccessful()) {
                 throw new IOException("API请求失败: " + response.code());
             }
-            
+
             String body = response.body().string();
             JsonNode array = mapper.readTree(body);
-            
+
             for (JsonNode item : array) {
                 String symbol = item.get("symbol").asText();
                 if (symbols.contains(symbol)) {
@@ -93,7 +88,7 @@ public class BinanceFuturesClient implements ExchangeClient {
             BigDecimal rate = new BigDecimal(randomRate).setScale(6, RoundingMode.HALF_UP);
             return rate;
         }
-        
+
         String url = baseUrl + "/fapi/v1/premiumIndex?symbol=" + symbol;
         Request request = new Request.Builder().url(url).get().build();
 
@@ -101,7 +96,7 @@ public class BinanceFuturesClient implements ExchangeClient {
             if (!response.isSuccessful()) {
                 throw new IOException("API请求失败: " + response.code());
             }
-            
+
             String body = response.body().string();
             JsonNode json = mapper.readTree(body);
             return new BigDecimal(json.get("lastFundingRate").asText());
@@ -135,7 +130,7 @@ public class BinanceFuturesClient implements ExchangeClient {
             } else {
                 String responseBody = response.body().string();
                 if (responseBody.contains("-4046")) {
-                    // 杠杆未变动，忽略
+                    // 杠杆未变动,忽略
                     log.debug("{} 杠杆已是 {}x", symbol, leverage);
                 } else {
                     log.warn("设置杠杆失败: {}", responseBody);
@@ -145,7 +140,7 @@ public class BinanceFuturesClient implements ExchangeClient {
     }
 
     /**
-     * 下限价单（用于网格交易）[功能4: 网格增强]
+     * 下限价单(用于网格交易)[功能4: 网格增强]
      */
     public String placeLimitOrder(String symbol, String side, BigDecimal quantity, BigDecimal price) throws IOException {
         if (Config.SIMULATION_MODE) {
@@ -239,7 +234,7 @@ public class BinanceFuturesClient implements ExchangeClient {
      */
     public BigDecimal getNextFundingRate(String symbol) throws IOException {
         String url = baseUrl + "/fapi/v1/fundingRate?symbol=" + symbol + "&limit=1";
-        
+
         Request request = new Request.Builder()
                 .url(url)
                 .get()
@@ -249,10 +244,10 @@ public class BinanceFuturesClient implements ExchangeClient {
             if (!response.isSuccessful()) {
                 throw new IOException("API请求失败: " + response.code());
             }
-            
+
             String body = response.body().string();
             JsonNode array = mapper.readTree(body);
-            
+
             if (array.size() > 0) {
                 String rate = array.get(0).get("fundingRate").asText();
                 return new BigDecimal(rate);
@@ -262,18 +257,37 @@ public class BinanceFuturesClient implements ExchangeClient {
     }
 
     /**
-     * 合约做空开仓（市价单）
-     * POST /fapi/v1/order
+     * 合约做空开仓（市价单）- 正费率时用
      */
     public String openShort(String symbol, BigDecimal quantity) throws IOException {
+        return executeOrder(symbol, "SELL", quantity);
+    }
+
+    /**
+     * 合约做多开仓（市价单）- 负费率时用
+     */
+    public String openLong(String symbol, BigDecimal quantity) throws IOException {
+        return executeOrder(symbol, "BUY", quantity);
+    }
+
+    @Override
+    public String getExchangeName() {
+        return "Binance";
+    }
+
+    /**
+     * 统一执行合约订单
+     */
+    private String executeOrder(String symbol, String side, BigDecimal quantity) throws IOException {
         if (Config.SIMULATION_MODE) {
-            log.info("[模拟模式] 合约做空开仓: {} 数量: {}", symbol, quantity);
+            log.info("[模拟模式] 合约{}开仓: {} 数量: {}",
+                    "BUY".equals(side) ? "做多" : "做空", symbol, quantity);
             return "SIM_" + System.currentTimeMillis();
         }
 
         long timestamp = System.currentTimeMillis();
         String params = "symbol=" + symbol +
-                "&side=SELL" +
+                "&side=" + side +
                 "&type=MARKET" +
                 "&quantity=" + quantity +
                 "&timestamp=" + timestamp;
@@ -293,17 +307,17 @@ public class BinanceFuturesClient implements ExchangeClient {
             if (!response.isSuccessful()) {
                 throw new IOException("开仓失败: " + responseBody);
             }
-            
+
             JsonNode json = mapper.readTree(responseBody);
             String orderId = json.get("orderId").asText();
-            log.info("✅ 合约做空成功 - 订单ID: {}, 数量: {}", orderId, quantity);
-            
+            log.info("✅ 合约{}成功 - 订单ID: {}, 数量: {}",
+                    "BUY".equals(side) ? "做多" : "做空", orderId, quantity);
             return orderId;
         }
     }
 
     /**
-     * 平掉合约空单（买入平仓）
+     * 平掉合约空单(买入平仓)
      */
     public String closeShort(String symbol, BigDecimal quantity) throws IOException {
         if (Config.SIMULATION_MODE) {
@@ -334,11 +348,11 @@ public class BinanceFuturesClient implements ExchangeClient {
             if (!response.isSuccessful()) {
                 throw new IOException("平仓失败: " + responseBody);
             }
-            
+
             JsonNode json = mapper.readTree(responseBody);
             String orderId = json.get("orderId").asText();
             log.info("✅ 平合约空单成功 - 订单ID: {}", orderId);
-            
+
             return orderId;
         }
     }
@@ -368,7 +382,7 @@ public class BinanceFuturesClient implements ExchangeClient {
             if (!response.isSuccessful()) {
                 throw new IOException("获取持仓失败: " + responseBody);
             }
-            
+
             JsonNode array = mapper.readTree(responseBody);
             for (JsonNode pos : array) {
                 if (pos.get("symbol").asText().equals(symbol)) {
@@ -406,10 +420,10 @@ public class BinanceFuturesClient implements ExchangeClient {
             if (!response.isSuccessful()) {
                 throw new IOException("获取余额失败: " + responseBody);
             }
-            
+
             JsonNode json = mapper.readTree(responseBody);
             JsonNode assets = json.get("assets");
-            
+
             for (JsonNode asset : assets) {
                 if (asset.get("asset").asText().equals("USDT")) {
                     String availableBalance = asset.get("availableBalance").asText();
@@ -423,7 +437,7 @@ public class BinanceFuturesClient implements ExchangeClient {
     }
 
     /**
-     * 设置逐仓模式（推荐）
+     * 设置逐仓模式(推荐)
      */
     public void setIsolatedMargin(String symbol) throws IOException {
         if (Config.SIMULATION_MODE) {
@@ -447,7 +461,7 @@ public class BinanceFuturesClient implements ExchangeClient {
             if (response.isSuccessful()) {
                 log.info("✅ 已设置逐仓模式: {}", symbol);
             } else {
-                // 可能已经是逐仓模式了，忽略错误
+                // 可能已经是逐仓模式了,忽略错误
                 log.debug("设置逐仓模式响应: {}", response.body().string());
             }
         }
@@ -482,12 +496,12 @@ public class BinanceFuturesClient implements ExchangeClient {
      */
     public boolean testConnection() {
         if (Config.SIMULATION_MODE) {
-            log.info("✅ [模拟模式] 币安合约API连接正常（模拟）");
+            log.info("✅ [模拟模式] 币安合约API连接正常(模拟)");
             return true;
         }
         try {
             BigDecimal rate = getFundingRate("BTCUSDT");
-            log.info("✅ 币安合约API连接正常，当前BTC资金费率: {}%", 
+            log.info("✅ 币安合约API连接正常,当前BTC资金费率: {}%",
                     rate.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
             return true;
         } catch (Exception e) {
@@ -496,88 +510,26 @@ public class BinanceFuturesClient implements ExchangeClient {
         }
     }
 
-    // ==================== 现货API ====================
+    // ==================== 【已废弃】现货API - 纯合约套利不需要现货 ====================
     
-    /**
-     * 现货买入
-     */
+    @Deprecated
     public String buySpot(String symbol, BigDecimal quantity) throws IOException {
-        if (Config.SIMULATION_MODE) {
-            log.info("[模拟模式] 现货买入 {}: 数量 {}", symbol, quantity);
-            return "SIM_SPOT_BUY_" + System.currentTimeMillis();
-        }
-
-        long timestamp = System.currentTimeMillis();
-        String params = "symbol=" + symbol +
-                "&side=BUY" +
-                "&type=MARKET" +
-                "&quantity=" + quantity +
-                "&timestamp=" + timestamp;
-
-        String signature = sign(params);
-        String url = "https://api.binance.com/api/v3/order?" + params + "&signature=" + signature;
-
-        okhttp3.RequestBody body = okhttp3.RequestBody.create("", 
-                okhttp3.MediaType.parse("application/json"));
-        okhttp3.Request request = new okhttp3.Request.Builder()
-                .url(url)
-                .header("X-MBX-APIKEY", apiKey)
-                .post(body)
-                .build();
-
-        try (okhttp3.Response response = httpClient.newCall(request).execute()) {
-            String responseBody = response.body().string();
-            if (!response.isSuccessful()) {
-                throw new IOException("现货买入失败: " + responseBody);
-            }
-            JsonNode json = mapper.readTree(responseBody);
-            return json.get("orderId").asText();
-        }
+        log.warn("⚠️  现货API已废弃！纯合约资金费率套利不需要现货！");
+        return "DEPRECATED_" + System.currentTimeMillis();
     }
-
-    /**
-     * 现货卖出
-     */
+    
+    @Deprecated
     public String sellSpot(String symbol, BigDecimal quantity) throws IOException {
-        if (Config.SIMULATION_MODE) {
-            log.info("[模拟模式] 现货卖出 {}: 数量 {}", symbol, quantity);
-            return "SIM_SPOT_SELL_" + System.currentTimeMillis();
-        }
-
-        long timestamp = System.currentTimeMillis();
-        String params = "symbol=" + symbol +
-                "&side=SELL" +
-                "&type=MARKET" +
-                "&quantity=" + quantity +
-                "&timestamp=" + timestamp;
-
-        String signature = sign(params);
-        String url = "https://api.binance.com/api/v3/order?" + params + "&signature=" + signature;
-
-        okhttp3.RequestBody body = okhttp3.RequestBody.create("", 
-                okhttp3.MediaType.parse("application/json"));
-        okhttp3.Request request = new okhttp3.Request.Builder()
-                .url(url)
-                .header("X-MBX-APIKEY", apiKey)
-                .post(body)
-                .build();
-
-        try (okhttp3.Response response = httpClient.newCall(request).execute()) {
-            String responseBody = response.body().string();
-            if (!response.isSuccessful()) {
-                throw new IOException("现货卖出失败: " + responseBody);
-            }
-            JsonNode json = mapper.readTree(responseBody);
-            return json.get("orderId").asText();
-        }
+        log.warn("⚠️  现货API已废弃！纯合约资金费率套利不需要现货！");
+        return "DEPRECATED_" + System.currentTimeMillis();
     }
 
     // ==================== 内部访问器 ====================
-    
+
     public okhttp3.OkHttpClient getHttpClient() {
         return httpClient;
     }
-    
+
     public com.fasterxml.jackson.databind.ObjectMapper getMapper() {
         return mapper;
     }

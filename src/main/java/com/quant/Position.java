@@ -12,10 +12,13 @@ public class Position {
 
     private String symbol;                  // 交易对
     private boolean hasPosition;            // 是否持仓
+    private String positionSide;            // 持仓方向：LONG=做多, SHORT=做空
     private BigDecimal positionSize;        // 持仓数量
     private BigDecimal entryPrice;          // 开仓均价
     private BigDecimal lastFundingRate;     // 持仓时的资金费率
     private LocalDateTime entryTime;        // 开仓时间
+    private LocalDateTime lastFundingTime;  // 上次资金费结算时间
+    private int fundingCount;               // 已结算次数
     private BigDecimal totalFundingEarned;  // 累计资金费收益
     private BigDecimal gridProfit;          // 网格收益
     private List<GridOrder> gridOrders;     // 网格订单列表
@@ -34,13 +37,49 @@ public class Position {
     /**
      * 开仓
      */
-    public void open(BigDecimal size, BigDecimal price, BigDecimal fundingRate) {
+    public void open(BigDecimal size, BigDecimal price, BigDecimal fundingRate, String side) {
         this.hasPosition = true;
         this.positionSize = size;
         this.entryPrice = price;
         this.lastFundingRate = fundingRate;
+        this.positionSide = side;
         this.entryTime = LocalDateTime.now();
+        this.fundingCount = 0;
+        this.totalFundingEarned = BigDecimal.ZERO;
         this.gridOrders.clear();
+    }
+
+    /**
+     * 记录一次资金费结算
+     */
+    public void recordFundingSettlement(BigDecimal earning) {
+        this.totalFundingEarned = this.totalFundingEarned.add(earning);
+        this.lastFundingTime = LocalDateTime.now();
+        this.fundingCount++;
+    }
+
+    /**
+     * 获取持仓小时数（用于判断是否足够拿到几次资金费）
+     */
+    public long getHoldingHours() {
+        if (entryTime == null) return 0;
+        return java.time.Duration.between(entryTime, LocalDateTime.now()).toHours();
+    }
+
+    /**
+     * 计算移仓是否划算（考虑手续费成本）
+     */
+    public boolean isSwitchWorthIt(BigDecimal newRate, BigDecimal switchThreshold, BigDecimal feeCost) {
+        BigDecimal currentRate = this.lastFundingRate;
+        BigDecimal diff = newRate.subtract(currentRate).abs();
+        
+        // 至少持仓 8 小时才考虑移仓（至少拿一次资金费）
+        if (getHoldingHours() < 8) {
+            return false;
+        }
+        
+        // 新费率必须比当前费率高出阈值 + 手续费成本才划算
+        return diff.compareTo(switchThreshold.add(feeCost)) > 0;
     }
 
     /**
@@ -75,6 +114,10 @@ public class Position {
         return hasPosition;
     }
 
+    public String getPositionSide() {
+        return positionSide;
+    }
+
     public BigDecimal getPositionSize() {
         return positionSize;
     }
@@ -83,16 +126,20 @@ public class Position {
         return entryPrice;
     }
 
+    public LocalDateTime getEntryTime() {
+        return entryTime;
+    }
+
+    public int getFundingCount() {
+        return fundingCount;
+    }
+
     public BigDecimal getLastFundingRate() {
         return lastFundingRate;
     }
 
     public void setLastFundingRate(BigDecimal lastFundingRate) {
         this.lastFundingRate = lastFundingRate;
-    }
-
-    public LocalDateTime getEntryTime() {
-        return entryTime;
     }
 
     public BigDecimal getTotalFundingEarned() {
