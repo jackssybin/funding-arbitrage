@@ -30,6 +30,7 @@ public class ExchangePrecision {
     // 缓存每个币种的精度规则
     private final Map<String, SymbolFilters> symbolFilters = new HashMap<>();
 
+    /** 支持传入 null（OKX 模式），此时使用 loadMockFilters 代替实际请求 */
     public ExchangePrecision(BinanceFuturesClient client) {
         this.client = client;
     }
@@ -57,6 +58,11 @@ public class ExchangePrecision {
      * 从交易所加载所有币种的精度规则
      */
     public void loadAllSymbolFilters() throws IOException {
+        if (client == null) {
+            log.info("ℹ️ OKX 模式下使用 Mock 精度规则");
+            loadMockFilters();
+            return;
+        }
         log.info("🔧 正在加载交易所精度规则...");
         
         String url = "https://fapi.binance.com/fapi/v1/exchangeInfo";

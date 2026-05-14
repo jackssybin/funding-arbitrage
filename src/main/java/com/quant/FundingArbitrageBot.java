@@ -41,7 +41,7 @@ public class FundingArbitrageBot {
             .build();
 
     // ========== 核心组件 ==========
-    private BinanceFuturesClient futuresClient;
+    private ExchangeClient futuresClient;
     private GridTrading gridTrading;
     private ExchangePrecision precision;           // 防线1: 精度对齐
     private AtomicTransactionManager txManager;     // 防线2: 原子性回滚
@@ -88,33 +88,41 @@ public class FundingArbitrageBot {
         try {
             log.info("=== 开始初始化 ===");
 
-            // 1. 初始化合约客户端
-            futuresClient = new BinanceFuturesClient(Config.API_KEY, Config.SECRET_KEY);
+            // 1. 通过工厂方法创建交易所客户端（Binance 或 OKX）
+            futuresClient = Config.createExchangeClient();
             if (!futuresClient.testConnection()) {
-                throw new RuntimeException("合约API连接失败");
+                throw new RuntimeException(futuresClient.getExchangeName() + " API 连接失败");
             }
 
             // 2. 初始化两道硬核防线
-            // 防线1: 精度对齐工具
-            precision = new ExchangePrecision(futuresClient);
+            // 防线1: 精度对齐工具（OKX 沿用 Binance exchangeInfo 接口做降级，模拟模式直接 Mock）
+            precision = new ExchangePrecision(
+                    futuresClient instanceof BinanceFuturesClient
+                            ? (BinanceFuturesClient) futuresClient
+                            : null);
             if (Config.SIMULATION_MODE) {
                 precision.loadMockFilters();
             } else {
                 precision.loadAllSymbolFilters();
             }
             
-            // 优化1: 智能下单引擎（查盘口深度，自动拆单防滑点）
+            // 优化1: 智能下单引擎
             smartOrderExecutor = new SmartOrderExecutor(futuresClient, precision);
             
-            // 防线2: 原子性事务管理器（集成智能下单）
+            // 防线2: 原子性事务管理器
             txManager = new AtomicTransactionManager(futuresClient, smartOrderExecutor);
 
-            // 优化2: 保证金守护线程（极端插针自动划转防爆仓）
-            marginGuardian = new MarginGuardian(futuresClient);
+            // 优化2: 保证金守护线程（仅 Binance 实现了划转接口，OKX 暂用 Binance 的实例传入 null 做模拟）
+            if (futuresClient instanceof BinanceFuturesClient) {
+                marginGuardian = new MarginGuardian((BinanceFuturesClient) futuresClient);
+            } else {
+                marginGuardian = new MarginGuardian(null);
+            }
             marginGuardian.start();
 
             // 3. 初始化网格交易组件
-            gridTrading = new GridTrading(futuresClient);
+            gridTrading = new GridTrading(futuresClient instanceof BinanceFuturesClient
+                    ? (BinanceFuturesClient) futuresClient : null);
 
             // 3. 初始化持仓对象
             for (String symbol : Config.TRADING_SYMBOLS) {

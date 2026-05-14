@@ -7,7 +7,7 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * 配置类 - 多币种资金费率套利增强版
+ * 配置类 - 支持 Binance / OKX 双交易所切换
  */
 public class Config {
 
@@ -15,9 +15,21 @@ public class Config {
             .ignoreIfMissing()
             .load();
 
-    // ========== API 配置 ==========
-    public static final String API_KEY = getEnv("API_KEY", "");
+    // ========== 交易所选择 ==========
+    /** 使用哪家交易所：binance 或 okx */
+    public static final String EXCHANGE = getEnv("EXCHANGE", "binance").toLowerCase();
+
+    // ========== Binance API 配置 ==========
+    public static final String API_KEY    = getEnv("API_KEY",    "");
     public static final String SECRET_KEY = getEnv("SECRET_KEY", "");
+
+    // ========== OKX API 配置 ==========
+    public static final String OKX_API_KEY    = getEnv("OKX_API_KEY",    "");
+    public static final String OKX_SECRET_KEY = getEnv("OKX_SECRET_KEY", "");
+    /** OKX 独有的 API 密码（创建 API 时自行设置的短语） */
+    public static final String OKX_PASSPHRASE = getEnv("OKX_PASSPHRASE", "");
+    /** 是否使用 OKX 官方模拟盘（true=模拟盘，false=实盘） */
+    public static final boolean OKX_SIMULATED_TRADING = Boolean.parseBoolean(getEnv("OKX_SIMULATED_TRADING", "false"));
 
     // ========== 多币种配置 [功能1] ==========
     // 监控的交易对列表
@@ -135,12 +147,31 @@ public class Config {
             System.out.println("⚠️  当前为模拟模式，不需要真实API Key");
             return true;
         }
+        if ("okx".equals(EXCHANGE)) {
+            if (OKX_API_KEY.isEmpty() || OKX_SECRET_KEY.isEmpty() || OKX_PASSPHRASE.isEmpty()) {
+                System.err.println("❌ 请配置 OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE");
+                return false;
+            }
+            return true;
+        }
+        // binance
         if (API_KEY.isEmpty() || SECRET_KEY.isEmpty()) {
             System.err.println("❌ 请配置 API_KEY 和 SECRET_KEY");
-            System.err.println("   方式1: 创建 .env 文件");
-            System.err.println("   方式2: 设置环境变量");
             return false;
         }
         return true;
+    }
+
+    /**
+     * 工厂方法：根据 EXCHANGE 配置创建对应的交易所客户端
+     */
+    public static ExchangeClient createExchangeClient() {
+        if ("okx".equals(EXCHANGE)) {
+            System.out.println("🔌 使用交易所：OKX" + (OKX_SIMULATED_TRADING ? " (官方模拟盘)" : " (实盘)"));
+            return new OkxClient(OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE, OKX_SIMULATED_TRADING);
+        } else {
+            System.out.println("🔌 使用交易所：Binance");
+            return new BinanceFuturesClient(API_KEY, SECRET_KEY);
+        }
     }
 }

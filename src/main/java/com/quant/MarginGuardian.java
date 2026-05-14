@@ -29,6 +29,7 @@ public class MarginGuardian {
     private volatile boolean running = false;
     private Thread guardianThread;
 
+    /** 当 client 为 null（如使用 OKX），守护线程仅输出日志，不执行划转 */
     public MarginGuardian(BinanceFuturesClient client) {
         this.client = client;
     }
@@ -75,6 +76,10 @@ public class MarginGuardian {
     }
 
     public void checkAndTopupIfNeeded() {
+        if (client == null) {
+            log.debug("[OKX模式] 保证金守护暂不支持自动划转，跳过检查");
+            return;
+        }
         try {
             AccountInfo accountInfo = getFuturesAccountInfo();
             if (accountInfo == null) {

@@ -29,10 +29,15 @@ public class SmartOrderExecutor {
     // 每笔小单的延迟（毫秒），避免冲击市场
     private static final long ORDER_INTERVAL_MS = 200;
 
-    private final BinanceFuturesClient client;
+    private final ExchangeClient client;
     private final ExchangePrecision precision;
+    private final okhttp3.OkHttpClient httpClient = new okhttp3.OkHttpClient.Builder()
+            .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .build();
+    private final com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
 
-    public SmartOrderExecutor(BinanceFuturesClient client, ExchangePrecision precision) {
+    public SmartOrderExecutor(ExchangeClient client, ExchangePrecision precision) {
         this.client = client;
         this.precision = precision;
     }
@@ -66,13 +71,13 @@ public class SmartOrderExecutor {
         String url = "https://fapi.binance.com/fapi/v1/depth?symbol=" + symbol + "&limit=20";
         okhttp3.Request request = new okhttp3.Request.Builder().url(url).get().build();
 
-        try (okhttp3.Response response = client.getHttpClient().newCall(request).execute()) {
+        try (okhttp3.Response response = httpClient.newCall(request).execute()) {
             if (!response.isSuccessful()) {
                 throw new IOException("获取深度失败: " + response.code());
             }
             
             String body = response.body().string();
-            JsonNode json = client.getMapper().readTree(body);
+            JsonNode json = mapper.readTree(body);
             
             OrderBookDepth depth = new OrderBookDepth();
             depth.symbol = symbol;
@@ -116,7 +121,7 @@ public class SmartOrderExecutor {
         if (totalQuantity.compareTo(maxPerOrder) <= 0) {
             log.info("✅ 订单量 {} 小于盘口深度 {}，直接一笔成交", totalQuantity, maxPerOrder);
             String orderId = client.buySpot(symbol, totalQuantity);
-            return List.of(orderId);
+            return java.util.Collections.singletonList(orderId);
         }
         
         // 需要拆单
@@ -170,7 +175,7 @@ public class SmartOrderExecutor {
         if (totalQuantity.compareTo(maxPerOrder) <= 0) {
             log.info("✅ 订单量 {} 小于盘口深度 {}，直接一笔成交", totalQuantity, maxPerOrder);
             String orderId = client.sellSpot(symbol, totalQuantity);
-            return List.of(orderId);
+            return java.util.Collections.singletonList(orderId);
         }
         
         log.info("⚠️ 订单量 {} 超过盘口深度 {} 的 50%，自动拆单执行", totalQuantity, maxPerOrder);
@@ -216,7 +221,7 @@ public class SmartOrderExecutor {
         
         if (Config.SIMULATION_MODE) {
             // 模拟模式直接一笔
-            return List.of(client.openShort(symbol, totalQuantity));
+            return java.util.Collections.singletonList(client.openShort(symbol, totalQuantity));
         }
         
         OrderBookDepth depth = getOrderBookDepth(symbol);
@@ -224,7 +229,7 @@ public class SmartOrderExecutor {
         
         if (totalQuantity.compareTo(maxPerOrder) <= 0) {
             log.info("✅ 直接一笔成交");
-            return List.of(client.openShort(symbol, totalQuantity));
+            return java.util.Collections.singletonList(client.openShort(symbol, totalQuantity));
         }
         
         log.info("⚠️ 自动拆单执行");
@@ -262,14 +267,14 @@ public class SmartOrderExecutor {
         log.info("🤖 智能平合约空单 {}: 总量 {}", symbol, totalQuantity);
         
         if (Config.SIMULATION_MODE) {
-            return List.of(client.closeShort(symbol, totalQuantity));
+            return java.util.Collections.singletonList(client.closeShort(symbol, totalQuantity));
         }
         
         OrderBookDepth depth = getOrderBookDepth(symbol);
         BigDecimal maxPerOrder = depth.askQty.multiply(DEPTH_THRESHOLD);
         
         if (totalQuantity.compareTo(maxPerOrder) <= 0) {
-            return List.of(client.closeShort(symbol, totalQuantity));
+            return java.util.Collections.singletonList(client.closeShort(symbol, totalQuantity));
         }
         
         List<String> orderIds = new ArrayList<>();

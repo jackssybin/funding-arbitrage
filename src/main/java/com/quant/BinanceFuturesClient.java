@@ -15,10 +15,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 币安合约API客户端
+ * 币安合约API客户端（实现 ExchangeClient 接口）
  * 完整实现：资金费率获取、合约下单、平仓、持仓查询
  */
-public class BinanceFuturesClient {
+public class BinanceFuturesClient implements ExchangeClient {
 
     private static final Logger log = LoggerFactory.getLogger(BinanceFuturesClient.class);
     private static final ObjectMapper mapper = new ObjectMapper();
@@ -36,6 +36,11 @@ public class BinanceFuturesClient {
         this.apiKey = apiKey;
         this.secretKey = secretKey;
         this.baseUrl = Config.BINANCE_FUTURES_API;
+    }
+
+    @Override
+    public String getExchangeName() {
+        return "Binance";
     }
 
     /**

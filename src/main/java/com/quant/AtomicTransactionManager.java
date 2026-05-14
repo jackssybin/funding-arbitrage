@@ -29,7 +29,7 @@ public class AtomicTransactionManager {
     private static final int MAX_RETRY = 3;
     private static final long RETRY_DELAY_MS = 1000;
 
-    private final BinanceFuturesClient futuresClient;
+    private final ExchangeClient futuresClient;
     private final SmartOrderExecutor smartOrderExecutor;  // 智能下单引擎
 
     // 事务状态
@@ -81,7 +81,7 @@ public class AtomicTransactionManager {
         }
     }
 
-    public AtomicTransactionManager(BinanceFuturesClient futuresClient, SmartOrderExecutor smartOrderExecutor) {
+    public AtomicTransactionManager(ExchangeClient futuresClient, SmartOrderExecutor smartOrderExecutor) {
         this.futuresClient = futuresClient;
         this.smartOrderExecutor = smartOrderExecutor;
     }

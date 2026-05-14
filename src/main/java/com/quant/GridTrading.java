@@ -17,6 +17,7 @@ public class GridTrading {
 
     private final BinanceFuturesClient futuresClient;
 
+    /** 支持传入 null，传入 null 时所有操作均使用模拟模式跨过 */
     public GridTrading(BinanceFuturesClient futuresClient) {
         this.futuresClient = futuresClient;
     }
@@ -36,7 +37,9 @@ public class GridTrading {
         log.info("🔧 为 {} 设置网格交易，当前价格: {}", symbol, currentPrice);
 
         // 先取消该币种的所有挂单
-        futuresClient.cancelAllOrders(symbol);
+        if (futuresClient != null) {
+            futuresClient.cancelAllOrders(symbol);
+        }
 
         // 计算网格订单的基础参数
         BigDecimal orderQuantity = position.getPositionSize()
@@ -50,7 +53,7 @@ public class GridTrading {
             BigDecimal buyPrice = currentPrice.multiply(BigDecimal.ONE.subtract(gridSpacing.multiply(BigDecimal.valueOf(i))));
             BigDecimal sellPrice = currentPrice.multiply(BigDecimal.ONE.add(gridSpacing.multiply(BigDecimal.valueOf(i))));
 
-            if (Config.SIMULATION_MODE) {
+            if (Config.SIMULATION_MODE || futuresClient == null) {
                 log.info("[模拟模式] 挂买入单 {}: 价格 {}, 数量 {}", symbol, buyPrice, orderQuantity);
                 log.info("[模拟模式] 挂卖出单 {}: 价格 {}, 数量 {}", symbol, sellPrice, orderQuantity);
                 continue;
@@ -116,6 +119,7 @@ public class GridTrading {
      * 取消某个币种的所有网格订单
      */
     public void cancelAllGridOrders(String symbol) {
+        if (futuresClient == null) return;
         try {
             futuresClient.cancelAllOrders(symbol);
             log.info("已取消 {} 的所有网格订单", symbol);
