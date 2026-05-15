@@ -29,10 +29,16 @@ public class SmartOrderExecutor {
 
     private final ExchangeClient client;
     private final ExchangePrecision precision;
+    private final RetryManager retryManager;
 
     public SmartOrderExecutor(ExchangeClient client, ExchangePrecision precision) {
+        this(client, precision, null);
+    }
+
+    public SmartOrderExecutor(ExchangeClient client, ExchangePrecision precision, RetryManager retryManager) {
         this.client = client;
         this.precision = precision;
+        this.retryManager = retryManager;
     }
 
     // ========== 四个方向的下单方法 ==========

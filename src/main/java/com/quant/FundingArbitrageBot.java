@@ -39,37 +39,64 @@ public class FundingArbitrageBot {
     private static final Logger log = LoggerFactory.getLogger(FundingArbitrageBot.class);
     private static final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    // ========== 费率阈值（P1 修复：精确核算手续费）==========
-    // 手续费精确计算：合约 taker 0.05% × 开平双边 × 3倍杠杆 = 0.30%
-    // 至少需要费率 × 3（杠杆）> 手续费，即费率 > 0.10% 才开仓
-    private static final BigDecimal MIN_FUNDING_RATE  = new BigDecimal("0.001");   // Bug-3修复: 0.10% 开仓阈值
-    private static final BigDecimal CLOSE_FUNDING_RATE = new BigDecimal("0.0003"); // 0.03% 平仓阈值
+    // ========== 费率阈值（更保守的手续费模型）==========
+    // 【关键修正：真实成本 = 0.05%手续费 × 2边 × 3倍杠杆 + 0.1%滑点/冲击成本 = 0.4%
+    // 需要至少持仓 0.15%费率才开仓（0.15% × 3倍 = 0.45%收益，刚好覆盖成本）
+    private static final BigDecimal MIN_FUNDING_RATE_POSITIVE = new BigDecimal("0.0015"); // 正费率0.15%
+    private static final BigDecimal MIN_FUNDING_RATE_NEGATIVE = new BigDecimal("0.0020"); // 负费率0.20%（风险更高）
+    
+    // ========== 费率趋势预测（防止开在下降通道
+    private static final int RATE_TREND_CHECK_MINUTES = 60; // 检查过去1小时费率趋势
+    private static final BigDecimal RATE_DECREASING_THRESHOLD = new BigDecimal("0.7"); // 费率下降超过30%不开仓
+    private static final BigDecimal CLOSE_FUNDING_RATE = new BigDecimal("0.0002"); // 0.02% 平仓阈值
     private static final BigDecimal SWITCH_THRESHOLD   = new BigDecimal("0.001");  // 0.10% 移仓阈值
-    // Bug-3修复: 单次双边手续费成本 = taker 0.05% × 2 × 3倍杠杆 = 0.30%
-    private static final BigDecimal FEE_PER_TRADE      = new BigDecimal("0.003");  // 0.30%
+    private static final BigDecimal FEE_PER_TRADE      = new BigDecimal("0.003");  // 0.30% 手续费
+    
+    // ========== 风控参数（优化：更严格的止损）==========
+    private static final BigDecimal STOP_LOSS_RATIO    = new BigDecimal("0.02");  // 2% 止损（之前5%太松）
+    private static final BigDecimal TAKE_PROFIT_RATIO  = new BigDecimal("0.03");  // 3% 止盈
+    
+    // ========== 负费率风险控制 ==========
+    private static final BigDecimal MAX_NEGATIVE_RATE  = new BigDecimal("-0.003"); // 低于-0.3%不做多（极端行情）
+    private static final BigDecimal MAX_24H_CHANGE     = new BigDecimal("0.1");    // 24h涨跌幅超过10%不交易
 
-    // ========== 结算时间（UTC 0, 8, 16 点）Bug-5修复: 全程使用 UTC 时间 ==========
+    // ========== 结算时间（UTC 0, 8, 16 点） ==========
     private static final List<Integer> FUNDING_HOURS = Arrays.asList(0, 8, 16);
-    // Bug-1修复: 防重复结算——记录上次结算的 UTC 小时，确保每个结算周期只结算一次
     private volatile int lastSettledHourUtc = -1;
 
     // ========== 核心组件 ==========
     private ExchangeClient exchangeClient;
-    private GridTrading gridTrading;
     private ExchangePrecision precision;
     private AtomicTransactionManager txManager;
     private SmartOrderExecutor smartOrderExecutor;
     private MarginGuardian marginGuardian;
+    private StrategyControl strategyControl;      // 策略控制器
+    private StrategyPersistence persistence;       // 持久化
+    private StrategyDashboard dashboard;           // Web仪表盘
+    private RetryManager retryManager;             // 重试管理器
 
     // ========== 状态变量 ==========
     private final Map<String, Position> positions = new HashMap<>();
     private final Map<String, BigDecimal> fundingRates = new HashMap<>();
+    private final Map<String, BigDecimal> price24hChange = new HashMap<>(); // 24h涨跌幅
+    private final Map<String, List<BigDecimal>> rateHistory = new HashMap<>(); // 费率历史用于趋势判断
+    
+    // ========== 风控熔断机制 ==========
+    private volatile int consecutiveLosses = 0;  // 连续亏损次数
+    private volatile BigDecimal dailyPnl = BigDecimal.ZERO;  // 当日盈亏
+    private static final int MAX_CONSECUTIVE_LOSSES = 3;  // 最多连续亏损3次
+    private static final BigDecimal MAX_DAILY_LOSS_AMOUNT = new BigDecimal("500");  // 单日最大亏损500USDT
+    private static final BigDecimal MAX_NET_EXPOSURE = new BigDecimal("0.5");  // 最大净敞口50%
+
+    // 费率有效性范围
+    private static final BigDecimal MIN_VALID_RATE = new BigDecimal("-0.01");
+    private static final BigDecimal MAX_VALID_RATE = new BigDecimal("0.01");
     private volatile BigDecimal totalPnl = BigDecimal.ZERO;
     private volatile int totalTrades = 0;
     private volatile LocalDateTime lastRateUpdate = null;
-    // Bug-4修复: 风控状态变量
     private volatile BigDecimal initialBalance = null;
     private volatile BigDecimal maxBalance     = BigDecimal.ZERO;
+    private volatile boolean dashboardEnabled = true; // 是否启用Web仪表盘
 
     public static void main(String[] args) {
         FundingArbitrageBot bot = new FundingArbitrageBot();
@@ -101,12 +128,28 @@ public class FundingArbitrageBot {
         try {
             log.info("=== 开始初始化 ===");
 
+            // 1. 初始化策略控制器
+            strategyControl = new StrategyControl();
+            strategyControl.setBot(this);
+            log.info("✅ 策略控制器初始化");
+
+            // 2. 初始化持久化
+            persistence = new StrategyPersistence();
+            log.info("✅ 持久化模块初始化");
+
+            // 3. 初始化重试管理器
+            retryManager = new RetryManager();
+            retryManager.start();
+            log.info("✅ 重试管理器初始化");
+
+            // 4. 初始化交易所客户端
             exchangeClient = Config.createExchangeClient();
             if (!exchangeClient.testConnection()) {
                 throw new RuntimeException(exchangeClient.getExchangeName() + " API 连接失败");
             }
             log.info("✅ {} API 连接成功", exchangeClient.getExchangeName());
 
+            // 5. 精度对齐
             if (exchangeClient instanceof BinanceFuturesClient) {
                 precision = new ExchangePrecision((BinanceFuturesClient) exchangeClient);
             } else {
@@ -119,31 +162,53 @@ public class FundingArbitrageBot {
             }
             log.info("✅ 精度对齐工具初始化");
 
-            smartOrderExecutor = new SmartOrderExecutor(exchangeClient, precision);
+            // 6. 事务与订单执行器
+            smartOrderExecutor = new SmartOrderExecutor(exchangeClient, precision, retryManager);
             txManager = new AtomicTransactionManager(exchangeClient, smartOrderExecutor);
             log.info("✅ 事务管理器初始化");
 
+            // 7. OKX 也支持保证金守护了
             if (exchangeClient instanceof BinanceFuturesClient) {
-                marginGuardian = new MarginGuardian((BinanceFuturesClient) exchangeClient);
+                marginGuardian = MarginGuardian.forBinance((BinanceFuturesClient) exchangeClient);
+            } else if (exchangeClient instanceof OkxClient) {
+                marginGuardian = MarginGuardian.forOkx((OkxClient) exchangeClient);
             } else {
-                marginGuardian = new MarginGuardian(null);
+                marginGuardian = MarginGuardian.forBinance(null);
             }
             marginGuardian.start();
             log.info("✅ 保证金守护线程已启动");
 
-            if (exchangeClient instanceof BinanceFuturesClient) {
-                gridTrading = new GridTrading((BinanceFuturesClient) exchangeClient);
-            } else {
-                gridTrading = new GridTrading(null);
-            }
-            log.info("✅ 网格交易组件初始化");
+            // 8. 网格交易
+            // 网格交易已移除，保持策略单一纯粹
 
+            // 9. 初始化持仓对象
             for (String symbol : Config.TRADING_SYMBOLS) {
                 positions.put(symbol, new Position(symbol));
             }
             log.info("✅ 监控 {} 个币种", Config.TRADING_SYMBOLS.size());
 
+            // 10. 恢复上次状态
+            StrategyPersistence.StrategyState savedState = persistence.restoreState();
+            if (savedState != null) {
+                totalPnl = BigDecimal.valueOf(savedState.totalPnl);
+                totalTrades = savedState.totalTrades;
+                log.info("✅ 已恢复历史收益: {} USDT, 交易次数: {}", savedState.totalPnl, savedState.totalTrades);
+            }
+
+            // 11. 启动异常恢复检查
+            if (!Config.SIMULATION_MODE) {
+                retryManager.recoverOnStartup(exchangeClient, positions);
+            }
+
+            // 12. 初始化数据
             updateFundingRates();
+            update24hPrices();
+
+            // 13. 启动Web仪表盘
+            if (dashboardEnabled) {
+                dashboard = new StrategyDashboard(Config.DASHBOARD_PORT, this, strategyControl, persistence);
+                dashboard.start();
+            }
 
             printConfig();
 
@@ -166,11 +231,16 @@ public class FundingArbitrageBot {
         log.info("│ 最大持仓数:     {} 个币种", Config.MAX_POSITIONS);
         log.info("│ 杠杆倍数:       {}x", Config.LEVERAGE);
         log.info("│ 单仓位价值:     {} USDT", Config.POSITION_VALUE_USDT);
-        log.info("│ 开仓阈值:       {}%", MIN_FUNDING_RATE.multiply(new BigDecimal("100")).setScale(3));
+        log.info("│ 正费率开仓:     {}%", MIN_FUNDING_RATE_POSITIVE.multiply(new BigDecimal("100")).setScale(3));
+        log.info("│ 负费率开仓:     {}%", MIN_FUNDING_RATE_NEGATIVE.multiply(new BigDecimal("100")).setScale(3));
         log.info("│ 平仓阈值:       {}%", CLOSE_FUNDING_RATE.multiply(new BigDecimal("100")).setScale(3));
-        log.info("│ 移仓阈值:       {}% + 手续费", SWITCH_THRESHOLD.multiply(new BigDecimal("100")).setScale(3));
+        log.info("│ 止损比例:       {}%", STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2));
+        log.info("│ 止盈比例:       {}%", TAKE_PROFIT_RATIO.multiply(new BigDecimal("100")).setScale(2));
         log.info("│ 网格交易:       {}", Config.GRID_ENABLED ? "启用 ✓" : "禁用");
         log.info("│ 模拟模式:       {}", Config.SIMULATION_MODE ? "开启 ✅" : "关闭 ❌");
+        if (dashboardEnabled) {
+        log.info("│ 仪表盘地址:     http://localhost:{}", Config.DASHBOARD_PORT);
+        }
         log.info("└───────────────────────────────────────────────────────┘");
         log.info("");
     }
@@ -188,10 +258,10 @@ public class FundingArbitrageBot {
 
                 checkAndSettleFunding(now);
                 updateFundingRatesIfNeeded();
+                update24hPrices(); // 更新24h涨跌幅用于风险过滤
                 checkRiskControl();
                 printCurrentStatus();
                 executeStrategy();
-                maintainGrids();
                 sleep();
 
             } catch (Exception e) {
@@ -229,7 +299,6 @@ public class FundingArbitrageBot {
         for (Position position : positions.values()) {
             if (!position.hasPosition()) continue;
 
-            // Bug-2修复: 使用实时查询到的当前费率，而非开仓时的旧费率
             BigDecimal currentRate = fundingRates.getOrDefault(position.getSymbol(), position.getLastFundingRate());
             BigDecimal notionalValue = position.getPositionSize().multiply(position.getEntryPrice());
             BigDecimal earning = notionalValue
@@ -237,9 +306,11 @@ public class FundingArbitrageBot {
                     .setScale(6, RoundingMode.HALF_UP);
 
             position.recordFundingSettlement(earning);
-            // 更新持仓记录的费率为本次结算的实时费率
             position.setLastFundingRate(currentRate);
             totalPnl = totalPnl.add(earning);
+
+            // 持久化记录
+            persistence.recordFunding(position.getSymbol(), earning, currentRate);
 
             log.info("💰 {} 资金费结算: {} USDT | 实时费率: {}% | 累计: {} USDT | 第{}次",
                     position.getSymbol(),
@@ -248,6 +319,184 @@ public class FundingArbitrageBot {
                     position.getTotalFundingEarned().setScale(4),
                     position.getFundingCount());
         }
+        // 结算后保存状态
+        persistence.saveState(positions, totalPnl, totalTrades);
+    }
+
+    /**
+     * 更新24h涨跌幅 - 用于负费率风险过滤
+     */
+    private void update24hPrices() {
+        try {
+            for (String symbol : Config.TRADING_SYMBOLS) {
+                BigDecimal change = exchangeClient.get24hChange(symbol);
+                price24hChange.put(symbol, change);
+            }
+            log.debug("✅ 已更新24h涨跌幅");
+        } catch (Exception e) {
+            log.warn("更新24h涨跌幅失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 检查极端行情风险（负费率专用）
+     * 费率太负说明市场极度看空，此时做多风险极大
+     */
+    private boolean isExtremeMarket(String symbol, BigDecimal rate) {
+        // 1. 费率低于 -0.3%，可能是极端行情
+        if (rate.compareTo(MAX_NEGATIVE_RATE) < 0) {
+            log.warn("⚠️  {} 费率 {}% 异常低，可能是极端行情，跳过做多", 
+                    symbol, rate.multiply(new BigDecimal("100")).setScale(4));
+            return true;
+        }
+
+        // 2. 24h涨跌幅超过 ±10%
+        BigDecimal change = price24hChange.getOrDefault(symbol, BigDecimal.ZERO);
+        if (change.abs().compareTo(MAX_24H_CHANGE) > 0) {
+            log.warn("⚠️  {} 24h涨跌幅 {}% 过大，跳过交易", 
+                    symbol, change.multiply(new BigDecimal("100")).setScale(2));
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * 检查费率趋势 - 防止开在费率下降通道
+     * 返回 true 表示趋势良好（正费率上升/负费率更负），可以开仓
+     */
+    private boolean isRateTrendGood(String symbol, BigDecimal currentRate) {
+        List<BigDecimal> history = rateHistory.get(symbol);
+        if (history == null || history.size() < 5) {
+            // 历史数据不足，保守判断为趋势良好
+            return true;
+        }
+
+        // 取最近5次数据的平均值
+        BigDecimal avgRate = BigDecimal.ZERO;
+        for (BigDecimal r : history) {
+            avgRate = avgRate.add(r);
+        }
+        avgRate = avgRate.divide(new BigDecimal(history.size()), 8, RoundingMode.HALF_UP);
+
+        // 趋势判断
+        if (currentRate.compareTo(BigDecimal.ZERO) > 0) {
+            // 正费率：当前费率应 > 历史平均的70%（即下降不超过30%）
+            BigDecimal threshold = avgRate.multiply(RATE_DECREASING_THRESHOLD);
+            boolean trendGood = currentRate.compareTo(threshold) >= 0;
+            if (!trendGood) {
+                log.warn("⚠️  {} 费率处于下降通道: 当前{}% vs 平均{}%，跳过开仓", symbol,
+                        currentRate.multiply(new BigDecimal("100")).setScale(4),
+                        avgRate.multiply(new BigDecimal("100")).setScale(4));
+            }
+            return trendGood;
+        } else {
+            // 负费率：绝对值应 > 历史平均的70%
+            BigDecimal threshold = avgRate.abs().multiply(RATE_DECREASING_THRESHOLD);
+            boolean trendGood = currentRate.abs().compareTo(threshold) >= 0;
+            if (!trendGood) {
+                log.warn("⚠️  {} 负费率处于衰减通道: 当前{}% vs 平均{}%，跳过开仓", symbol,
+                        currentRate.abs().multiply(new BigDecimal("100")).setScale(4),
+                        avgRate.abs().multiply(new BigDecimal("100")).setScale(4));
+            }
+            return trendGood;
+        }
+    }
+
+    /**
+     * 计算净敞口 - 多空净方向暴露
+     * 返回正值表示净多头比例，负值表示净空头比例（0-1之间）
+     */
+    private BigDecimal calculateNetExposure() {
+        BigDecimal totalNotional = BigDecimal.ZERO;
+        BigDecimal netNotional = BigDecimal.ZERO;
+
+        for (Position pos : positions.values()) {
+            if (!pos.hasPosition()) continue;
+
+            BigDecimal notional = pos.getPositionSize().multiply(pos.getEntryPrice());
+            totalNotional = totalNotional.add(notional);
+
+            if ("LONG".equals(pos.getPositionSide())) {
+                netNotional = netNotional.add(notional);
+            } else {
+                netNotional = netNotional.subtract(notional);
+            }
+        }
+
+        if (totalNotional.compareTo(BigDecimal.ZERO) == 0) {
+            return BigDecimal.ZERO;
+        }
+
+        return netNotional.divide(totalNotional, 4, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * 检查净敞口是否超限
+     * 开仓前调用，确保不会出现单边全空/全多
+     */
+    private boolean isExposureAcceptable(String newSide) {
+        BigDecimal currentExposure = calculateNetExposure();
+
+        // 假设新仓位大小（简化计算，不精确但保守
+        BigDecimal singlePositionRatio = BigDecimal.ONE.divide(
+                new BigDecimal(strategyControl.getMaxPositions()), 4, RoundingMode.HALF_UP
+        );
+
+        BigDecimal newExposure;
+        if ("LONG".equals(newSide)) {
+            newExposure = currentExposure.add(singlePositionRatio);
+        } else {
+            newExposure = currentExposure.subtract(singlePositionRatio);
+        }
+
+        boolean acceptable = newExposure.abs().compareTo(MAX_NET_EXPOSURE) <= 0;
+
+        if (!acceptable) {
+            log.warn("⚠️  净敞口超限: 当前{}%，开{}后将达{}%，限制{}%，跳过开仓",
+                    currentExposure.multiply(new BigDecimal("100")).setScale(2),
+                    newSide,
+                    newExposure.abs().multiply(new BigDecimal("100")).setScale(2),
+                    MAX_NET_EXPOSURE.multiply(new BigDecimal("100")).setScale(0));
+        }
+
+        return acceptable;
+    }
+
+    /**
+     * 策略熔断检查 - 连续亏损/单日大亏后暂停
+     */
+    private boolean isTradingAllowed() {
+        // 1. 连续亏损熔断
+        if (consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) {
+            log.warn("🚨 连续亏损{}次触发熔断，暂停开仓", consecutiveLosses);
+            return false;
+        }
+
+        // 2. 单日亏损熔断
+        if (dailyPnl.compareTo(MAX_DAILY_LOSS_AMOUNT.negate()) < 0) {
+            log.warn("🚨 单日亏损{}USDT触发熔断，暂停开仓", dailyPnl.setScale(2));
+            return false;
+        }
+
+        // 3. 策略控制层面暂停
+        if (strategyControl != null && strategyControl.isTradingPaused()) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * 记录一次平仓盈亏，更新熔断状态
+     */
+    private void recordClosePnl(BigDecimal pnl) {
+        dailyPnl = dailyPnl.add(pnl);
+        if (pnl.compareTo(BigDecimal.ZERO) < 0) {
+            consecutiveLosses++;
+        } else {
+            consecutiveLosses = 0;
+        }
     }
 
     private void updateFundingRates() {
@@ -255,6 +504,20 @@ public class FundingArbitrageBot {
             Map<String, BigDecimal> rates = exchangeClient.getAllFundingRates(Config.TRADING_SYMBOLS);
             this.fundingRates.putAll(rates);
             this.lastRateUpdate = LocalDateTime.now();
+
+            // 记录费率历史用于趋势判断
+            for (Map.Entry<String, BigDecimal> entry : rates.entrySet()) {
+                String symbol = entry.getKey();
+                BigDecimal rate = entry.getValue();
+                rateHistory.computeIfAbsent(symbol, k -> new LinkedList<>());
+                List<BigDecimal> history = rateHistory.get(symbol);
+                history.add(rate);
+                // 只保留最近20条数据
+                while (history.size() > 20) {
+                    ((LinkedList<BigDecimal>) history).removeFirst();
+                }
+            }
+
             log.info("✅ 已更新 {} 个币种的资金费率", rates.size());
         } catch (IOException e) {
             log.error("更新资金费率失败: {}", e.getMessage());
@@ -318,7 +581,7 @@ public class FundingArbitrageBot {
         }
     }
 
-    private void emergencyCloseAll() {
+    public void emergencyCloseAll() {
         log.warn("⚠️  执行紧急平仓...");
         for (Position position : positions.values()) {
             if (position.hasPosition()) {
@@ -395,10 +658,17 @@ public class FundingArbitrageBot {
 
     // ==================== P0 + P4 核心策略逻辑 ====================
     private void executeStrategy() {
+        // 如果交易暂停，只监控不开仓
+        if (strategyControl != null && strategyControl.isTradingPaused()) {
+            log.debug("⏸️  交易已暂停，跳过策略执行");
+            return;
+        }
+
         List<Map.Entry<String, BigDecimal>> sortedRates = new ArrayList<>(fundingRates.entrySet());
         sortedRates.sort((a, b) -> b.getValue().abs().compareTo(a.getValue().abs()));
 
-        int currentPositions = (int) positions.values().stream().filter(Position::hasPosition).count();
+        int currentPositionsCount = (int) positions.values().stream().filter(Position::hasPosition).count();
+        int maxPositions = strategyControl != null ? strategyControl.getMaxPositions() : Config.MAX_POSITIONS;
 
         for (Position position : positions.values()) {
             if (!position.hasPosition()) continue;
@@ -420,7 +690,7 @@ public class FundingArbitrageBot {
                         symbol,
                         currentRate.abs().multiply(new BigDecimal("100")).setScale(4));
                 closePosition(symbol);
-                currentPositions--;
+                currentPositionsCount--;
                 continue;
             }
 
@@ -430,7 +700,7 @@ public class FundingArbitrageBot {
                         symbol,
                         position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2));
                 closePosition(symbol);
-                currentPositions--;
+                currentPositionsCount--;
                 continue;
             }
 
@@ -440,7 +710,7 @@ public class FundingArbitrageBot {
                         symbol,
                         position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2));
                 closePosition(symbol);
-                currentPositions--;
+                currentPositionsCount--;
             }
         }
 
@@ -456,16 +726,42 @@ public class FundingArbitrageBot {
                 continue;
             }
 
-            if (rate.abs().compareTo(MIN_FUNDING_RATE) < 0) {
+            // 动态阈值：正费率0.06%，负费率0.08%（负费率风险更高）
+            BigDecimal minRate = rate.compareTo(BigDecimal.ZERO) >= 0 
+                    ? MIN_FUNDING_RATE_POSITIVE 
+                    : MIN_FUNDING_RATE_NEGATIVE;
+
+            if (rate.abs().compareTo(minRate) < 0) {
                 break;
             }
 
-            if (!position.hasPosition() && currentPositions < Config.MAX_POSITIONS) {
+            // 负费率额外检查：是否是极端行情
+            if (rate.compareTo(BigDecimal.ZERO) < 0 && isExtremeMarket(symbol, rate)) {
+                continue;
+            }
+
+            // 【新增1: 策略熔断检查
+            if (!isTradingAllowed()) {
+                continue;
+            }
+
+            // 【新增2: 费率趋势检查 - 不接下落的刀
+            if (!isRateTrendGood(symbol, rate)) {
+                continue;
+            }
+
+            // 【新增3: 净敞口检查 - 防止单边全空/全多
+            String side = rate.compareTo(BigDecimal.ZERO) >= 0 ? "SHORT" : "LONG";
+            if (!isExposureAcceptable(side)) {
+                continue;
+            }
+
+            if (!position.hasPosition() && currentPositionsCount < maxPositions) {
                 log.info("🎯 {} 费率 {}% 达标，准备开仓...",
                         symbol, rate.abs().multiply(new BigDecimal("100")).setScale(4));
                 openPosition(symbol, rate);
-                currentPositions++;
-            } else if (!position.hasPosition() && currentPositions >= Config.MAX_POSITIONS) {
+                currentPositionsCount++;
+            } else if (!position.hasPosition() && currentPositionsCount >= maxPositions) {
                 Position toClose = positions.values().stream()
                         .filter(Position::hasPosition)
                         .min(Comparator.comparing(p -> p.getLastFundingRate().abs()))
@@ -530,10 +826,6 @@ public class FundingArbitrageBot {
             position.open(alignedQuantity, currentPrice, fundingRate, side);
             totalTrades++;
 
-            if (Config.GRID_ENABLED) {
-                gridTrading.setupGrid(position, currentPrice);
-            }
-
             BigDecimal annualized = fundingRate.abs()
                     .multiply(new BigDecimal("1095"))
                     .multiply(new BigDecimal(Config.LEVERAGE))
@@ -559,10 +851,6 @@ public class FundingArbitrageBot {
         if (!position.hasPosition()) return;
 
         try {
-            if (Config.GRID_ENABLED) {
-                gridTrading.cancelAllGridOrders(symbol);
-            }
-
             BigDecimal alignedQuantity = precision.alignQuantity(symbol, position.getPositionSize());
 
             String side = position.getPositionSide();
@@ -572,10 +860,23 @@ public class FundingArbitrageBot {
                 throw new IOException("⚠️ 平仓异常: " + result.message);
             }
 
-            log.info("💵 持仓期间资金费收益: {} USDT (持仓 {} 小时, {} 次结算)",
+            // 计算平仓盈亏（浮盈浮亏实现化）
+            BigDecimal closePnl = BigDecimal.ZERO;
+            if (position.getUnrealizedPnl() != null) {
+                closePnl = position.getUnrealizedPnl();
+            }
+            // 加上资金费收益
+            BigDecimal totalReturn = position.getTotalFundingEarned().add(closePnl);
+
+            log.info("💵 平仓结算: 资金费收益{} USDT, 买卖盈亏{} USDT, 合计{} USDT (持仓{}小时, {}次结算)",
                     position.getTotalFundingEarned().setScale(4),
+                    closePnl.setScale(4),
+                    totalReturn.setScale(4),
                     position.getHoldingHours(),
                     position.getFundingCount());
+
+            // 记录盈亏用于熔断机制
+            recordClosePnl(totalReturn);
 
             position.close();
             totalTrades++;
@@ -589,29 +890,28 @@ public class FundingArbitrageBot {
         }
     }
 
-    private void maintainGrids() {
-        if (!Config.GRID_ENABLED) return;
-
-        for (Position position : positions.values()) {
-            if (position.hasPosition()) {
-                try {
-                    BigDecimal currentPrice = exchangeClient.getCurrentPrice(position.getSymbol());
-                    gridTrading.maintainGridOrders(position, currentPrice);
-                } catch (Exception e) {
-                    log.warn("维护 {} 网格订单失败: {}", position.getSymbol(), e.getMessage());
-                }
-            }
-        }
-    }
-
     private void sleep() {
         try {
-            log.info("💤 等待 {} 分钟后下次检查...", Config.CHECK_INTERVAL_MS / 1000 / 60);
+            long interval = strategyControl != null ? strategyControl.getCheckIntervalMs() : Config.CHECK_INTERVAL_MS;
+            log.info("💤 等待 {} 分钟后下次检查...", interval / 1000 / 60);
             log.info("");
-            Thread.sleep(Config.CHECK_INTERVAL_MS);
+            Thread.sleep(interval);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.info("程序被中断，正在退出...");
         }
+    }
+
+    // ===== Getters for Dashboard =====
+    public Map<String, Position> getPositions() {
+        return positions;
+    }
+
+    public BigDecimal getTotalPnl() {
+        return totalPnl;
+    }
+
+    public int getTotalTrades() {
+        return totalTrades;
     }
 }

@@ -126,6 +126,11 @@ public class Config {
             getEnv("RATE_UPDATE_INTERVAL_MS", "1800000")
     );
     
+    // Web仪表盘端口
+    public static final int DASHBOARD_PORT = Integer.parseInt(
+            getEnv("DASHBOARD_PORT", "8080")
+    );
+    
     // 是否使用模拟模式（不下单）
     public static final boolean SIMULATION_MODE = Boolean.parseBoolean(
             getEnv("SIMULATION_MODE", "true")

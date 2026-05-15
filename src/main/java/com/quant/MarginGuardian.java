@@ -25,13 +25,30 @@ public class MarginGuardian {
     private static final BigDecimal TOPUP_AMOUNT = new BigDecimal("500");
     private static final long CHECK_INTERVAL_MS = 30_000;
 
-    private final BinanceFuturesClient client;
+    private BinanceFuturesClient client;
     private volatile boolean running = false;
     private Thread guardianThread;
 
     /** 当 client 为 null（如使用 OKX），守护线程仅输出日志，不执行划转 */
-    public MarginGuardian(BinanceFuturesClient client) {
-        this.client = client;
+    private OkxClient okxClient;
+
+    /** 通用构造函数 - 传入具体交易所实现 */
+    private MarginGuardian() {
+    }
+
+    /** Binance 构造函数 */
+    public static MarginGuardian forBinance(BinanceFuturesClient client) {
+        MarginGuardian mg = new MarginGuardian();
+        mg.client = client;
+        return mg;
+    }
+
+    /** OKX 构造函数 */
+    public static MarginGuardian forOkx(OkxClient okxClient) {
+        MarginGuardian mg = new MarginGuardian();
+        mg.okxClient = okxClient;
+        log.info("🛡️  使用 OKX 保证金守护");
+        return mg;
     }
 
     public void start() {

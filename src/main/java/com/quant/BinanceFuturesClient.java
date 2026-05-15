@@ -230,6 +230,31 @@ public class BinanceFuturesClient implements ExchangeClient {
     }
 
     /**
+     * 获取24h涨跌幅
+     */
+    public BigDecimal get24hChange(String symbol) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            return BigDecimal.ZERO; // 模拟模式返回0
+        }
+
+        String url = baseUrl + "/fapi/v1/ticker/24hr?symbol=" + symbol;
+        Request request = new Request.Builder().url(url).get().build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = response.body().string();
+            JsonNode json = mapper.readTree(body);
+            return new BigDecimal(json.get("priceChangePercent").asText());
+        }
+    }
+
+    /**
+     * 获取当前持仓（实现ExchangeClient接口）
+     */
+    public BigDecimal getCurrentPosition(String symbol) throws IOException {
+        return getPositionAmount(symbol);
+    }
+
+    /**
      * 获取预计下一期资金费率
      */
     public BigDecimal getNextFundingRate(String symbol) throws IOException {
@@ -270,11 +295,7 @@ public class BinanceFuturesClient implements ExchangeClient {
         return executeOrder(symbol, "BUY", quantity);
     }
 
-    /**
-     * 合约平多（市价单）*/
-    public String closeLong(String symbol, BigDecimal quantity) throws IOException {
-        return executeOrder(symbol, "SELL", quantity);
-    }
+
 
     @Override
     public String getExchangeName() {

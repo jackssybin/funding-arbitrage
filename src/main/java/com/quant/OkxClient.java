@@ -139,6 +139,35 @@ public class OkxClient implements ExchangeClient {
         }
     }
 
+    /**
+     * 获取24h涨跌幅
+     * OKX 接口：GET /api/v5/market/ticker?instId=BTC-USDT-SWAP
+     */
+    @Override
+    public BigDecimal get24hChange(String symbol) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            return BigDecimal.ZERO;
+        }
+
+        String instId = toOkxInstId(symbol);
+        String url = BASE_URL + "/api/v5/market/ticker?instId=" + instId;
+
+        Request request = new Request.Builder().url(url).get().build();
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = checkResponse(response, "获取24h涨跌幅");
+            JsonNode json = mapper.readTree(body);
+            return new BigDecimal(json.get("data").get(0).get("sodUtc8").asText());
+        }
+    }
+
+    /**
+     * 获取当前持仓（实现ExchangeClient接口）
+     */
+    @Override
+    public BigDecimal getCurrentPosition(String symbol) throws IOException {
+        return getPositionAmount(symbol);
+    }
+
     // ===================================================================
     // 合约接口（需要签名）
     // ===================================================================

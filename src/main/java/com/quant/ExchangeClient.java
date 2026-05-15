@@ -22,6 +22,12 @@ public interface ExchangeClient {
     /** 获取当前最新价格 */
     BigDecimal getCurrentPrice(String symbol) throws IOException;
 
+    /** 获取24小时涨跌幅 */
+    BigDecimal get24hChange(String symbol) throws IOException;
+
+    /** 获取当前持仓（兼容不同交易所） */
+    BigDecimal getCurrentPosition(String symbol) throws IOException;
+
     // ===== 合约操作 =====
 
     /** 设置杠杆倍数 */
@@ -38,7 +44,8 @@ public interface ExchangeClient {
 
     /** 合约平多（卖出平仓） */
     String closeLong(String symbol, BigDecimal quantity) throws IOException;
-    /** 查询合约持仓数量（负数=空仓） */
+    /** 查询合约持仓数量（负数=空仓） - 已废弃，请使用 getCurrentPosition */
+    @Deprecated
     BigDecimal getPositionAmount(String symbol) throws IOException;
 
     /** 查询合约账户可用余额 (USDT) */
