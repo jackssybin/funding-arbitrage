@@ -30,9 +30,14 @@ public interface ExchangeClient {
     /** 合约开空（做空永续合约） */
     String openShort(String symbol, BigDecimal quantity) throws IOException;
 
+    /** 合约开多（做多永续合约）- 资金费为负时使用 */
+    String openLong(String symbol, BigDecimal quantity) throws IOException;
+
     /** 合约平空（买入平仓） */
     String closeShort(String symbol, BigDecimal quantity) throws IOException;
 
+    /** 合约平多（卖出平仓） */
+    String closeLong(String symbol, BigDecimal quantity) throws IOException;
     /** 查询合约持仓数量（负数=空仓） */
     BigDecimal getPositionAmount(String symbol) throws IOException;
 

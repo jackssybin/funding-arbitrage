@@ -70,9 +70,9 @@ public class Config {
     );
 
     // ========== 网格交易配置 [功能4] ==========
-    // 是否启用网格增强
+    // Bug-6修复: 网格默认关闭——网格与纯合约资金费索利策略不兼容，默认不启用
     public static final boolean GRID_ENABLED = Boolean.parseBoolean(
-            getEnv("GRID_ENABLED", "true")
+            getEnv("GRID_ENABLED", "false")
     );
     
     // 网格层数

@@ -66,8 +66,7 @@ public class SmartOrderExecutor {
             if ("SELL".equals(side)) {
                 return client.openShort(symbol, totalQuantity);
             } else {
-                // OKX 目前只有开空接口，用开空模拟（因为接口里只有 openShort）
-                return client.openShort(symbol, totalQuantity);
+                return client.openLong(symbol, totalQuantity);
             }
         }
 
@@ -79,7 +78,7 @@ public class SmartOrderExecutor {
             if ("SELL".equals(side)) {
                 return client.openShort(symbol, totalQuantity);
             } else {
-                return client.openShort(symbol, totalQuantity);
+                return client.openLong(symbol, totalQuantity);
             }
         }
 
@@ -103,7 +102,7 @@ public class SmartOrderExecutor {
             if ("SELL".equals(side)) {
                 orderId = client.openShort(symbol, thisQty);
             } else {
-                orderId = client.openShort(symbol, thisQty);
+                orderId = client.openLong(symbol, thisQty);  // Bug-6修复: 多头应调 openLong
             }
             orderIds.add(orderId);
 

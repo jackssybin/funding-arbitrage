@@ -7,6 +7,8 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 
@@ -37,16 +39,19 @@ public class FundingArbitrageBot {
     private static final Logger log = LoggerFactory.getLogger(FundingArbitrageBot.class);
     private static final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    // ========== 费率阈值（P1 修复：考虑手续费）==========
-    // 单次开平仓手续费约 0.02% * 杠杆倍数，3倍就是 0.06%，两次就是 0.12%
-    // 至少要持仓 2-3 次结算才能回本，所以阈值不能太低
-    private static final BigDecimal MIN_FUNDING_RATE = new BigDecimal("0.00015");  // 0.015% 开仓阈值
-    private static final BigDecimal CLOSE_FUNDING_RATE = new BigDecimal("0.00008");  // 0.008% 平仓阈值
-    private static final BigDecimal SWITCH_THRESHOLD = new BigDecimal("0.0005");     // 0.05% 移仓阈值
-    private static final BigDecimal FEE_PER_TRADE = new BigDecimal("0.0006");        // 单次交易手续费成本（3倍杠杆）
+    // ========== 费率阈值（P1 修复：精确核算手续费）==========
+    // 手续费精确计算：合约 taker 0.05% × 开平双边 × 3倍杠杆 = 0.30%
+    // 至少需要费率 × 3（杠杆）> 手续费，即费率 > 0.10% 才开仓
+    private static final BigDecimal MIN_FUNDING_RATE  = new BigDecimal("0.001");   // Bug-3修复: 0.10% 开仓阈值
+    private static final BigDecimal CLOSE_FUNDING_RATE = new BigDecimal("0.0003"); // 0.03% 平仓阈值
+    private static final BigDecimal SWITCH_THRESHOLD   = new BigDecimal("0.001");  // 0.10% 移仓阈值
+    // Bug-3修复: 单次双边手续费成本 = taker 0.05% × 2 × 3倍杠杆 = 0.30%
+    private static final BigDecimal FEE_PER_TRADE      = new BigDecimal("0.003");  // 0.30%
 
-    // ========== 结算时间（币安 UTC 0, 8, 16 点 = 北京时间 8, 16, 24 点）
-    private static final List<Integer> FUNDING_HOURS = Arrays.asList(0, 8, 16);  // UTC 时间
+    // ========== 结算时间（UTC 0, 8, 16 点）Bug-5修复: 全程使用 UTC 时间 ==========
+    private static final List<Integer> FUNDING_HOURS = Arrays.asList(0, 8, 16);
+    // Bug-1修复: 防重复结算——记录上次结算的 UTC 小时，确保每个结算周期只结算一次
+    private volatile int lastSettledHourUtc = -1;
 
     // ========== 核心组件 ==========
     private ExchangeClient exchangeClient;
@@ -62,6 +67,9 @@ public class FundingArbitrageBot {
     private volatile BigDecimal totalPnl = BigDecimal.ZERO;
     private volatile int totalTrades = 0;
     private volatile LocalDateTime lastRateUpdate = null;
+    // Bug-4修复: 风控状态变量
+    private volatile BigDecimal initialBalance = null;
+    private volatile BigDecimal maxBalance     = BigDecimal.ZERO;
 
     public static void main(String[] args) {
         FundingArbitrageBot bot = new FundingArbitrageBot();
@@ -198,13 +206,22 @@ public class FundingArbitrageBot {
         }
     }
 
-    // ==================== P2 修复：资金费结算逻辑 ====================
-    private void checkAndSettleFunding(LocalDateTime now) {
-        int hour = now.getHour();
-        int minute = now.getMinute();
-        if (FUNDING_HOURS.contains(hour) && minute >= 0 && minute < 15) {
-            log.info("💰 资金费结算时间窗口！检查持仓...");
-            settleFundingFee();
+    // ==================== P2 修复：资金费结算逻辑（Bug-1 防重复 + Bug-5 UTC）====================
+    private void checkAndSettleFunding(LocalDateTime ignoredLocalNow) {
+        // Bug-5修复: 使用 UTC 时间判断结算窗口
+        ZonedDateTime utcNow = ZonedDateTime.now(ZoneOffset.UTC);
+        int utcHour   = utcNow.getHour();
+        int utcMinute = utcNow.getMinute();
+
+        // Bug-1修复: 只在结算窗口的前 15 分钟内执行，且每个窗口只结算一次
+        if (FUNDING_HOURS.contains(utcHour) && utcMinute < 15) {
+            if (lastSettledHourUtc != utcHour) {
+                log.info("💰 检测到资金费结算窗口 UTC {}:00，开始结算...", utcHour);
+                settleFundingFee();
+                lastSettledHourUtc = utcHour;  // 标记已结算，本窗口不再重复
+            } else {
+                log.debug("⏸️  UTC {}:00 本轮结算已完成，跳过重复结算", utcHour);
+            }
         }
     }
 
@@ -212,15 +229,22 @@ public class FundingArbitrageBot {
         for (Position position : positions.values()) {
             if (!position.hasPosition()) continue;
 
+            // Bug-2修复: 使用实时查询到的当前费率，而非开仓时的旧费率
+            BigDecimal currentRate = fundingRates.getOrDefault(position.getSymbol(), position.getLastFundingRate());
             BigDecimal notionalValue = position.getPositionSize().multiply(position.getEntryPrice());
-            BigDecimal earning = notionalValue.multiply(position.getLastFundingRate().abs()).setScale(6, RoundingMode.HALF_UP);
+            BigDecimal earning = notionalValue
+                    .multiply(currentRate.abs())
+                    .setScale(6, RoundingMode.HALF_UP);
 
             position.recordFundingSettlement(earning);
+            // 更新持仓记录的费率为本次结算的实时费率
+            position.setLastFundingRate(currentRate);
             totalPnl = totalPnl.add(earning);
 
-            log.info("💰 {} 结算资金费: {} USDT (累计: {} USDT, 第 {} 次)",
+            log.info("💰 {} 资金费结算: {} USDT | 实时费率: {}% | 累计: {} USDT | 第{}次",
                     position.getSymbol(),
                     earning.setScale(4),
+                    currentRate.abs().multiply(new BigDecimal("100")).setScale(4),
                     position.getTotalFundingEarned().setScale(4),
                     position.getFundingCount());
         }
@@ -249,7 +273,62 @@ public class FundingArbitrageBot {
         marginGuardian.checkAndTopupIfNeeded();
     }
 
+    // Bug-4修复: updateBalance 补全风控逻辑
     private void updateBalance() {
+        try {
+            BigDecimal balance = exchangeClient.getBalance();
+            if (initialBalance == null) {
+                initialBalance = balance;
+                maxBalance = balance;
+                log.info("📊 初始余额: {} USDT", balance.setScale(2, RoundingMode.HALF_UP));
+            }
+            if (balance.compareTo(maxBalance) > 0) {
+                maxBalance = balance;
+            }
+
+            // 最低余额检查
+            if (balance.compareTo(Config.MIN_BALANCE) < 0) {
+                log.error("🚨 风控触发！账户余额 {} USDT 低于最低要求 {} USDT，紧急平仓所有仓位！",
+                        balance.setScale(2, RoundingMode.HALF_UP), Config.MIN_BALANCE);
+                emergencyCloseAll();
+                return;
+            }
+
+            // 最大回撤检查
+            if (maxBalance.compareTo(BigDecimal.ZERO) > 0) {
+                BigDecimal drawdown = maxBalance.subtract(balance)
+                        .divide(maxBalance, 6, RoundingMode.HALF_UP);
+                if (drawdown.compareTo(Config.MAX_DRAWDOWN_PERCENT) > 0) {
+                    log.error("🚨 风控触发！最大回撤 {}% 超过阈值 {}%，紧急平仓所有仓位！",
+                            drawdown.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
+                            Config.MAX_DRAWDOWN_PERCENT.multiply(new BigDecimal("100")));
+                    emergencyCloseAll();
+                }
+            }
+
+            // 单日亏损检查
+            if (totalPnl.compareTo(Config.MAX_DAILY_LOSS.negate()) < 0) {
+                log.error("🚨 风控触发！单日亏损 {} USDT 超过阈值 {} USDT，停止交易！",
+                        totalPnl.setScale(2, RoundingMode.HALF_UP), Config.MAX_DAILY_LOSS);
+                emergencyCloseAll();
+            }
+
+        } catch (IOException e) {
+            log.error("❌ 获取余额失败（风控无法执行）: {}", e.getMessage());
+        }
+    }
+
+    private void emergencyCloseAll() {
+        log.warn("⚠️  执行紧急平仓...");
+        for (Position position : positions.values()) {
+            if (position.hasPosition()) {
+                try {
+                    closePosition(position.getSymbol());
+                } catch (Exception e) {
+                    log.error("紧急平仓 {} 失败: {}", position.getSymbol(), e.getMessage());
+                }
+            }
+        }
     }
 
     private void printCurrentStatus() {

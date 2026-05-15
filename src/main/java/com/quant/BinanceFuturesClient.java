@@ -358,6 +358,31 @@ public class BinanceFuturesClient implements ExchangeClient {
     }
 
     /**
+     * Bug-6修复: 平合约多单（卖出平仓，reduceOnly=true 防止误开反向仓）
+     */
+    @Override
+    public String closeLong(String symbol, BigDecimal quantity) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            log.info("[模拟模式] 平合约多单: {} 数量: {}", symbol, quantity);
+            return "SIM_CLOSE_LONG_" + System.currentTimeMillis();
+        }
+        long timestamp = System.currentTimeMillis();
+        String params = "symbol=" + symbol + "&side=SELL&type=MARKET&quantity=" + quantity
+                + "&reduceOnly=true&timestamp=" + timestamp;
+        String signature = sign(params);
+        String url = baseUrl + "/fapi/v1/order?" + params + "&signature=" + signature;
+        RequestBody body = RequestBody.create("", MediaType.parse("application/json"));
+        Request request = new Request.Builder().url(url).header("X-MBX-APIKEY", apiKey).post(body).build();
+        try (Response response = httpClient.newCall(request).execute()) {
+            String responseBody = response.body().string();
+            if (!response.isSuccessful()) throw new IOException("平多仓失败: " + responseBody);
+            String orderId = mapper.readTree(responseBody).get("orderId").asText();
+            log.info("✅ 平合约多单成功 - 订单ID: {}", orderId);
+            return orderId;
+        }
+    }
+
+    /**
      * 获取当前持仓数量
      * GET /fapi/v2/positionRisk
      */
