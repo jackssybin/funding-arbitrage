@@ -135,7 +135,9 @@ funding-arbitrage/
 │
 ├── 📂 data/                            # 持久化数据目录（运行后自动生成）
 │   ├── 📄 strategy_state.json          # 策略状态（持仓、收益、参数）
-│   └── 📄 trades_history.csv           # 交易历史记录（开平仓、资金费）
+│   ├── 📄 trades_history.csv           # 交易历史记录（开平仓、资金费）
+│   └── 📂 daily_reports/               # 日报目录（每天自动生成markdown报告）
+│       └── 📄 YYYY-MM-DD.md           # 每日详细报告
 │
 └── 📂 logs/                            # 日志目录（运行后自动生成）
     ├── 📄 app.log                      # 当前日志

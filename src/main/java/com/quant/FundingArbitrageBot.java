@@ -74,6 +74,7 @@ public class FundingArbitrageBot {
     private StrategyPersistence persistence;       // 持久化
     private StrategyDashboard dashboard;           // Web仪表盘
     private RetryManager retryManager;             // 重试管理器
+    private DailyReporter dailyReporter;           // 自动日报生成器
 
     // ========== 状态变量 ==========
     private final Map<String, Position> positions = new HashMap<>();
@@ -137,7 +138,11 @@ public class FundingArbitrageBot {
             persistence = new StrategyPersistence();
             log.info("✅ 持久化模块初始化");
 
-            // 3. 初始化重试管理器
+            // 3. 初始化日报生成器
+            dailyReporter = new DailyReporter();
+            log.info("✅ 自动日报生成器初始化");
+
+            // 4. 初始化重试管理器
             retryManager = new RetryManager();
             retryManager.start();
             log.info("✅ 重试管理器初始化");
@@ -256,6 +261,9 @@ public class FundingArbitrageBot {
                 log.info("═══════════════════════════════════════════════════════");
                 log.info("⏰ 检查时间: {}", now.format(dtf));
 
+                // 检查是否需要生成新的日报（新的一天）
+                dailyReporter.checkAndGenerateReport();
+
                 checkAndSettleFunding(now);
                 updateFundingRatesIfNeeded();
                 update24hPrices(); // 更新24h涨跌幅用于风险过滤
@@ -311,6 +319,8 @@ public class FundingArbitrageBot {
 
             // 持久化记录
             persistence.recordFunding(position.getSymbol(), earning, currentRate);
+            // 日报记录
+            dailyReporter.recordFundingSettlement(position.getSymbol(), earning, currentRate);
 
             log.info("💰 {} 资金费结算: {} USDT | 实时费率: {}% | 累计: {} USDT | 第{}次",
                     position.getSymbol(),
@@ -548,6 +558,8 @@ public class FundingArbitrageBot {
             if (balance.compareTo(maxBalance) > 0) {
                 maxBalance = balance;
             }
+            // 更新日报余额
+            dailyReporter.updateBalance(balance);
 
             // 最低余额检查
             if (balance.compareTo(Config.MIN_BALANCE) < 0) {
@@ -627,6 +639,16 @@ public class FundingArbitrageBot {
                         .multiply(new BigDecimal("1095"))
                         .multiply(new BigDecimal(Config.LEVERAGE))
                         .multiply(new BigDecimal("100"));
+                // 日报：记录持仓快照
+                dailyReporter.snapshotPosition(
+                        position.getSymbol(),
+                        position.getPositionSide(),
+                        position.getPositionSize(),
+                        position.getEntryPrice(),
+                        position.getUnrealizedPnl() != null ? position.getUnrealizedPnl() : BigDecimal.ZERO,
+                        position.getUnrealizedPnlRatio() != null ? position.getUnrealizedPnlRatio() : BigDecimal.ZERO,
+                        position.getLastFundingRate()
+                );
                 
                 // P2 修复：显示浮盈浮亏
                 String pnlStr = "";
@@ -825,6 +847,8 @@ public class FundingArbitrageBot {
             Position position = positions.get(symbol);
             position.open(alignedQuantity, currentPrice, fundingRate, side);
             totalTrades++;
+            // 日报记录开仓
+            dailyReporter.recordOpen(symbol, side, alignedQuantity, fundingRate);
 
             BigDecimal annualized = fundingRate.abs()
                     .multiply(new BigDecimal("1095"))
@@ -881,6 +905,10 @@ public class FundingArbitrageBot {
             position.close();
             totalTrades++;
 
+            // 日报记录平仓
+            BigDecimal finalPnl = position.getUnrealizedPnl() != null ? position.getUnrealizedPnl() : BigDecimal.ZERO;
+            dailyReporter.recordClose(symbol, position.getTotalFundingEarned(), finalPnl, "费率降低/止盈止损");
+
             log.info("");
             log.info("✅ 平仓完成！");
             log.info("");
@@ -913,5 +941,9 @@ public class FundingArbitrageBot {
 
     public int getTotalTrades() {
         return totalTrades;
+    }
+
+    public DailyReporter getDailyReporter() {
+        return dailyReporter;
     }
 }
