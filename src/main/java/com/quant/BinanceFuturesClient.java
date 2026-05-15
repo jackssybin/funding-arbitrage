@@ -270,6 +270,12 @@ public class BinanceFuturesClient implements ExchangeClient {
         return executeOrder(symbol, "BUY", quantity);
     }
 
+    /**
+     * 合约平多（市价单）*/
+    public String closeLong(String symbol, BigDecimal quantity) throws IOException {
+        return executeOrder(symbol, "SELL", quantity);
+    }
+
     @Override
     public String getExchangeName() {
         return "Binance";

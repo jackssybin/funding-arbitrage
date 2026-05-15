@@ -364,14 +364,24 @@ public class FundingArbitrageBot {
                         .multiply(new BigDecimal("1095"))
                         .multiply(new BigDecimal(Config.LEVERAGE))
                         .multiply(new BigDecimal("100"));
-                log.info("│   ✓ {}: {} {} (年化 {}%, 第 {} 次, 持仓 {}h, 已赚 {} USDT)",
+                
+                // P2 修复：显示浮盈浮亏
+                String pnlStr = "";
+                if (position.getUnrealizedPnlRatio() != null) {
+                    BigDecimal pnlPercent = position.getUnrealizedPnlRatio().multiply(new BigDecimal("100"));
+                    String pnlSign = pnlPercent.compareTo(BigDecimal.ZERO) >= 0 ? "+" : "";
+                    pnlStr = String.format(", 浮盈浮亏: %s%s%%", pnlSign, pnlPercent.setScale(2));
+                }
+                
+                log.info("│   ✓ {}: {} {} (年化 {}%, 第 {} 次, 持仓 {}h, 已赚 {} USDT{})",
                         position.getSymbol(),
                         position.getPositionSide(),
                         position.getPositionSize().setScale(4),
                         annualized.setScale(2),
                         position.getFundingCount(),
                         position.getHoldingHours(),
-                        position.getTotalFundingEarned().setScale(4));
+                        position.getTotalFundingEarned().setScale(4),
+                        pnlStr);
             }
         }
         if (holdCount == 0) {
@@ -393,12 +403,43 @@ public class FundingArbitrageBot {
         for (Position position : positions.values()) {
             if (!position.hasPosition()) continue;
 
-            BigDecimal currentRate = fundingRates.getOrDefault(position.getSymbol(), BigDecimal.ZERO);
+            String symbol = position.getSymbol();
+            BigDecimal currentRate = fundingRates.getOrDefault(symbol, BigDecimal.ZERO);
+
+            // P2 修复：实时更新浮盈浮亏
+            try {
+                BigDecimal currentPrice = exchangeClient.getCurrentPrice(symbol);
+                position.updateUnrealizedPnl(currentPrice);
+            } catch (Exception e) {
+                log.warn("更新 {} 盈亏失败: {}", symbol, e.getMessage());
+            }
+
+            // 检查费率是否低于平仓阈值
             if (currentRate.abs().compareTo(CLOSE_FUNDING_RATE) < 0) {
                 log.info("📉 {} 费率 {}% 低于平仓阈值，准备平仓...",
-                        position.getSymbol(),
+                        symbol,
                         currentRate.abs().multiply(new BigDecimal("100")).setScale(4));
-                closePosition(position.getSymbol());
+                closePosition(symbol);
+                currentPositions--;
+                continue;
+            }
+
+            // P2 修复：止损检查 - 强制平仓防止极端行情
+            if (position.isStopLossTriggered(STOP_LOSS_RATIO)) {
+                log.error("🚨 {} 触发止损！盈亏 {}%，强制平仓",
+                        symbol,
+                        position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2));
+                closePosition(symbol);
+                currentPositions--;
+                continue;
+            }
+
+            // P2 修复：止盈检查 - 大行情主动止盈离场
+            if (position.isTakeProfitTriggered(TAKE_PROFIT_RATIO)) {
+                log.info("🎯 {} 触发止盈！盈亏 {}%，主动平仓",
+                        symbol,
+                        position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2));
+                closePosition(symbol);
                 currentPositions--;
             }
         }
@@ -407,6 +448,13 @@ public class FundingArbitrageBot {
             String symbol = entry.getKey();
             BigDecimal rate = entry.getValue();
             Position position = positions.get(symbol);
+
+            // P2 修复：跳过无效的异常费率数据
+            if (rate.compareTo(MIN_VALID_RATE) < 0 || rate.compareTo(MAX_VALID_RATE) > 0) {
+                log.warn("⚠️ {} 费率 {}% 异常，跳过", symbol,
+                        rate.multiply(new BigDecimal("100")).setScale(4));
+                continue;
+            }
 
             if (rate.abs().compareTo(MIN_FUNDING_RATE) < 0) {
                 break;

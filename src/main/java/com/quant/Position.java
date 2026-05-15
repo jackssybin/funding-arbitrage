@@ -1,6 +1,7 @@
 package com.quant;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -20,6 +21,9 @@ public class Position {
     private LocalDateTime lastFundingTime;  // 上次资金费结算时间
     private int fundingCount;               // 已结算次数
     private BigDecimal totalFundingEarned;  // 累计资金费收益
+    private BigDecimal unrealizedPnl;       // 未实现盈亏
+    private BigDecimal unrealizedPnlRatio;  // 未实现盈亏比例
+    private BigDecimal markPrice;           // 当前标记价格
     private BigDecimal gridProfit;          // 网格收益
     private List<GridOrder> gridOrders;     // 网格订单列表
 
@@ -70,15 +74,16 @@ public class Position {
      * 计算移仓是否划算（考虑手续费成本）
      */
     public boolean isSwitchWorthIt(BigDecimal newRate, BigDecimal switchThreshold, BigDecimal feeCost) {
-        BigDecimal currentRate = this.lastFundingRate;
+        BigDecimal currentRate = this.lastFundingRate.abs();
         BigDecimal diff = newRate.subtract(currentRate).abs();
         
-        // 至少持仓 8 小时才考虑移仓（至少拿一次资金费）
-        if (getHoldingHours() < 8) {
+        // 至少持仓 6 小时才考虑移仓（至少接近下一个结算点）
+        if (getHoldingHours() < 6) {
             return false;
         }
         
         // 新费率必须比当前费率高出阈值 + 手续费成本才划算
+        // 原则：移仓后至少需要持仓 2 个结算周期才能回本，否则不划算
         return diff.compareTo(switchThreshold.add(feeCost)) > 0;
     }
 
@@ -96,6 +101,52 @@ public class Position {
      */
     public void addFundingEarning(BigDecimal earning) {
         this.totalFundingEarned = this.totalFundingEarned.add(earning);
+    }
+
+    /**
+     * 更新浮盈浮亏
+     */
+    public void updateUnrealizedPnl(BigDecimal currentPrice) {
+        if (!hasPosition || BigDecimal.ZERO.equals(positionSize)) {
+            this.unrealizedPnl = BigDecimal.ZERO;
+            this.unrealizedPnlRatio = BigDecimal.ZERO;
+            this.markPrice = currentPrice;
+            return;
+        }
+
+        this.markPrice = currentPrice;
+        BigDecimal notionalValue = positionSize.multiply(entryPrice);
+        
+        if ("SHORT".equals(positionSide)) {
+            // 做空：(开仓价 - 当前价) * 数量 = 盈利
+            this.unrealizedPnl = entryPrice.subtract(currentPrice).multiply(positionSize);
+        } else {
+            // 做多：(当前价 - 开仓价) * 数量 = 盈利
+            this.unrealizedPnl = currentPrice.subtract(entryPrice).multiply(positionSize);
+        }
+        
+        // 盈亏比例 = 盈亏 / 名义价值
+        if (notionalValue.compareTo(BigDecimal.ZERO) > 0) {
+            this.unrealizedPnlRatio = this.unrealizedPnl.divide(notionalValue, 6, RoundingMode.HALF_UP);
+        } else {
+            this.unrealizedPnlRatio = BigDecimal.ZERO;
+        }
+    }
+
+    /**
+     * 判断是否需要止损（亏损超过 5%）
+     */
+    public boolean isStopLossTriggered(BigDecimal stopLossRatio) {
+        if (unrealizedPnlRatio == null) return false;
+        return unrealizedPnlRatio.compareTo(stopLossRatio.negate()) < 0;
+    }
+
+    /**
+     * 判断是否需要止盈（盈利超过 10%）
+     */
+    public boolean isTakeProfitTriggered(BigDecimal takeProfitRatio) {
+        if (unrealizedPnlRatio == null) return false;
+        return unrealizedPnlRatio.compareTo(takeProfitRatio) > 0;
     }
 
     /**
@@ -144,6 +195,18 @@ public class Position {
 
     public BigDecimal getTotalFundingEarned() {
         return totalFundingEarned;
+    }
+
+    public BigDecimal getUnrealizedPnl() {
+        return unrealizedPnl;
+    }
+
+    public BigDecimal getUnrealizedPnlRatio() {
+        return unrealizedPnlRatio;
+    }
+
+    public BigDecimal getMarkPrice() {
+        return markPrice;
     }
 
     public BigDecimal getGridProfit() {

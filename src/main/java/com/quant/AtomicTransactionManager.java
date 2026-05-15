@@ -141,7 +141,7 @@ public class AtomicTransactionManager {
             try {
                 log.info("执行 {} (第 {} 次尝试)...", op, attempt);
 
-                if ("FUTURES_OPEN".equals(op.type) || "FUTURES_CLOSE".equals(op.type)) {
+                if ("FUTURES_OPEN".equals(op.type)) {
                     String orderId;
                     if ("SELL".equals(side)) {
                         orderId = smartOrderExecutor.smartOpenShort(op.symbol, op.quantity);
@@ -150,7 +150,20 @@ public class AtomicTransactionManager {
                     }
                     op.orderId = orderId;
                     op.status = "SUCCESS";
-                    log.info("✅ 订单执行成功: {}", orderId);
+                    log.info("✅ 开仓订单执行成功: {}", orderId);
+                    return true;
+                } else if ("FUTURES_CLOSE".equals(op.type)) {
+                    String orderId;
+                    if ("BUY".equals(side)) {
+                        // 平空：SELL -> BUY back
+                        orderId = smartOrderExecutor.smartCloseShort(op.symbol, op.quantity);
+                    } else {
+                        // 平多：BUY -> SELL back
+                        orderId = smartOrderExecutor.smartCloseLong(op.symbol, op.quantity);
+                    }
+                    op.orderId = orderId;
+                    op.status = "SUCCESS";
+                    log.info("✅ 平仓订单执行成功: {}", orderId);
                     return true;
                 }
 

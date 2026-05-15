@@ -27,7 +27,7 @@ public interface ExchangeClient {
     /** 设置杠杆倍数 */
     void setLeverage(String symbol, int leverage) throws IOException;
 
-    /** 合约开空（做空永续合约） */
+    /** 合约开空（做空永续合约）- 正费率时用 */
     String openShort(String symbol, BigDecimal quantity) throws IOException;
 
     /** 合约开多（做多永续合约）- 资金费为负时使用 */
