@@ -1,4 +1,5 @@
 package com.quant;
+import java.math.RoundingMode;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -51,7 +52,7 @@ public class AtomicTransactionManager {
 
         log.info("币种: {}, 方向: {} (费率 {}%), 数量: {}", 
                 symbol, sideName, 
-                fundingRate.abs().multiply(new BigDecimal("100")).setScale(4),
+                fundingRate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
                 quantity);
 
         TxOperation operation = new TxOperation("FUTURES_OPEN", symbol, quantity);
