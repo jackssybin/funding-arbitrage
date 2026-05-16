@@ -39,11 +39,10 @@ public class FundingArbitrageBot {
     private static final Logger log = LoggerFactory.getLogger(FundingArbitrageBot.class);
     private static final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    // ========== 费率阈值（更保守的手续费模型）==========
-    // 【关键修正：真实成本 = 0.05%手续费 × 2边 × 3倍杠杆 + 0.1%滑点/冲击成本 = 0.4%
-    // 需要至少持仓 0.15%费率才开仓（0.15% × 3倍 = 0.45%收益，刚好覆盖成本）
-    private static final BigDecimal MIN_FUNDING_RATE_POSITIVE = new BigDecimal("0.0015"); // 正费率0.15%
-    private static final BigDecimal MIN_FUNDING_RATE_NEGATIVE = new BigDecimal("0.0020"); // 负费率0.20%（风险更高）
+    // ========== 费率阈值（模拟盘大胆验证功能）==========
+    // 模拟盘：降低到 0.03%，先验证程序功能正常
+    private static final BigDecimal MIN_FUNDING_RATE_POSITIVE = new BigDecimal("0.0003"); // 正费率0.03%
+    private static final BigDecimal MIN_FUNDING_RATE_NEGATIVE = new BigDecimal("0.0005"); // 负费率0.05%
     
     // ========== 费率趋势预测（防止开在下降通道
     private static final int RATE_TREND_CHECK_MINUTES = 60; // 检查过去1小时费率趋势
@@ -236,11 +235,11 @@ public class FundingArbitrageBot {
         log.info("│ 最大持仓数:     {} 个币种", Config.MAX_POSITIONS);
         log.info("│ 杠杆倍数:       {}x", Config.LEVERAGE);
         log.info("│ 单仓位价值:     {} USDT", Config.POSITION_VALUE_USDT);
-        log.info("│ 正费率开仓:     {}%", MIN_FUNDING_RATE_POSITIVE.multiply(new BigDecimal("100")).setScale(3));
-        log.info("│ 负费率开仓:     {}%", MIN_FUNDING_RATE_NEGATIVE.multiply(new BigDecimal("100")).setScale(3));
-        log.info("│ 平仓阈值:       {}%", CLOSE_FUNDING_RATE.multiply(new BigDecimal("100")).setScale(3));
-        log.info("│ 止损比例:       {}%", STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2));
-        log.info("│ 止盈比例:       {}%", TAKE_PROFIT_RATIO.multiply(new BigDecimal("100")).setScale(2));
+        log.info("│ 正费率开仓:     {}%", MIN_FUNDING_RATE_POSITIVE.multiply(new BigDecimal("100")).setScale(3, RoundingMode.HALF_UP));
+        log.info("│ 负费率开仓:     {}%", MIN_FUNDING_RATE_NEGATIVE.multiply(new BigDecimal("100")).setScale(3, RoundingMode.HALF_UP));
+        log.info("│ 平仓阈值:       {}%", CLOSE_FUNDING_RATE.multiply(new BigDecimal("100")).setScale(3, RoundingMode.HALF_UP));
+        log.info("│ 止损比例:       {}%", STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
+        log.info("│ 止盈比例:       {}%", TAKE_PROFIT_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
         log.info("│ 网格交易:       {}", Config.GRID_ENABLED ? "启用 ✓" : "禁用");
         log.info("│ 模拟模式:       {}", Config.SIMULATION_MODE ? "开启 ✅" : "关闭 ❌");
         if (dashboardEnabled) {
@@ -324,9 +323,9 @@ public class FundingArbitrageBot {
 
             log.info("💰 {} 资金费结算: {} USDT | 实时费率: {}% | 累计: {} USDT | 第{}次",
                     position.getSymbol(),
-                    earning.setScale(4),
-                    currentRate.abs().multiply(new BigDecimal("100")).setScale(4),
-                    position.getTotalFundingEarned().setScale(4),
+                    earning.setScale(4, RoundingMode.HALF_UP),
+                    currentRate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
+                    position.getTotalFundingEarned().setScale(4, RoundingMode.HALF_UP),
                     position.getFundingCount());
         }
         // 结算后保存状态
@@ -356,7 +355,7 @@ public class FundingArbitrageBot {
         // 1. 费率低于 -0.3%，可能是极端行情
         if (rate.compareTo(MAX_NEGATIVE_RATE) < 0) {
             log.warn("⚠️  {} 费率 {}% 异常低，可能是极端行情，跳过做多", 
-                    symbol, rate.multiply(new BigDecimal("100")).setScale(4));
+                    symbol, rate.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
             return true;
         }
 
@@ -364,7 +363,7 @@ public class FundingArbitrageBot {
         BigDecimal change = price24hChange.getOrDefault(symbol, BigDecimal.ZERO);
         if (change.abs().compareTo(MAX_24H_CHANGE) > 0) {
             log.warn("⚠️  {} 24h涨跌幅 {}% 过大，跳过交易", 
-                    symbol, change.multiply(new BigDecimal("100")).setScale(2));
+                    symbol, change.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
             return true;
         }
 
@@ -396,8 +395,8 @@ public class FundingArbitrageBot {
             boolean trendGood = currentRate.compareTo(threshold) >= 0;
             if (!trendGood) {
                 log.warn("⚠️  {} 费率处于下降通道: 当前{}% vs 平均{}%，跳过开仓", symbol,
-                        currentRate.multiply(new BigDecimal("100")).setScale(4),
-                        avgRate.multiply(new BigDecimal("100")).setScale(4));
+                        currentRate.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
+                        avgRate.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
             }
             return trendGood;
         } else {
@@ -406,8 +405,8 @@ public class FundingArbitrageBot {
             boolean trendGood = currentRate.abs().compareTo(threshold) >= 0;
             if (!trendGood) {
                 log.warn("⚠️  {} 负费率处于衰减通道: 当前{}% vs 平均{}%，跳过开仓", symbol,
-                        currentRate.abs().multiply(new BigDecimal("100")).setScale(4),
-                        avgRate.abs().multiply(new BigDecimal("100")).setScale(4));
+                        currentRate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
+                        avgRate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
             }
             return trendGood;
         }
@@ -464,10 +463,10 @@ public class FundingArbitrageBot {
 
         if (!acceptable) {
             log.warn("⚠️  净敞口超限: 当前{}%，开{}后将达{}%，限制{}%，跳过开仓",
-                    currentExposure.multiply(new BigDecimal("100")).setScale(2),
+                    currentExposure.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
                     newSide,
-                    newExposure.abs().multiply(new BigDecimal("100")).setScale(2),
-                    MAX_NET_EXPOSURE.multiply(new BigDecimal("100")).setScale(0));
+                    newExposure.abs().multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
+                    MAX_NET_EXPOSURE.multiply(new BigDecimal("100")).setScale(0, RoundingMode.HALF_UP));
         }
 
         return acceptable;
@@ -485,7 +484,7 @@ public class FundingArbitrageBot {
 
         // 2. 单日亏损熔断
         if (dailyPnl.compareTo(MAX_DAILY_LOSS_AMOUNT.negate()) < 0) {
-            log.warn("🚨 单日亏损{}USDT触发熔断，暂停开仓", dailyPnl.setScale(2));
+            log.warn("🚨 单日亏损{}USDT触发熔断，暂停开仓", dailyPnl.setScale(2, RoundingMode.HALF_UP));
             return false;
         }
 
@@ -622,7 +621,7 @@ public class FundingArbitrageBot {
             BigDecimal rate = entry.getValue();
             Position pos = positions.get(symbol);
             String holdingFlag = (pos != null && pos.hasPosition()) ? "✓" : "";
-            String ratePercent = rate.abs().multiply(new BigDecimal("100")).setScale(4).toString() + "%";
+            String ratePercent = rate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP).toString() + "%";
             String rateDir = rate.compareTo(BigDecimal.ZERO) >= 0 ? "正(开空)" : "负(开多)";
             log.info("│   {} {}: {} ({})", holdingFlag, symbol, ratePercent, rateDir);
         }
@@ -655,17 +654,17 @@ public class FundingArbitrageBot {
                 if (position.getUnrealizedPnlRatio() != null) {
                     BigDecimal pnlPercent = position.getUnrealizedPnlRatio().multiply(new BigDecimal("100"));
                     String pnlSign = pnlPercent.compareTo(BigDecimal.ZERO) >= 0 ? "+" : "";
-                    pnlStr = String.format(", 浮盈浮亏: %s%s%%", pnlSign, pnlPercent.setScale(2));
+                    pnlStr = String.format(", 浮盈浮亏: %s%s%%", pnlSign, pnlPercent.setScale(2, RoundingMode.HALF_UP));
                 }
                 
                 log.info("│   ✓ {}: {} {} (年化 {}%, 第 {} 次, 持仓 {}h, 已赚 {} USDT{})",
                         position.getSymbol(),
                         position.getPositionSide(),
-                        position.getPositionSize().setScale(4),
-                        annualized.setScale(2),
+                        position.getPositionSize().setScale(4, RoundingMode.HALF_UP),
+                        annualized.setScale(2, RoundingMode.HALF_UP),
                         position.getFundingCount(),
                         position.getHoldingHours(),
-                        position.getTotalFundingEarned().setScale(4),
+                        position.getTotalFundingEarned().setScale(4, RoundingMode.HALF_UP),
                         pnlStr);
             }
         }
@@ -673,7 +672,7 @@ public class FundingArbitrageBot {
             log.info("│   暂无持仓");
         }
         log.info("│   持仓总数: {} / {}", holdCount, Config.MAX_POSITIONS);
-        log.info("│   累计收益: {} USDT", totalPnl.setScale(4));
+        log.info("│   累计收益: {} USDT", totalPnl.setScale(4, RoundingMode.HALF_UP));
         log.info("└───────────────────────────────────────────────────────┘");
         log.info("");
     }
@@ -710,7 +709,7 @@ public class FundingArbitrageBot {
             if (currentRate.abs().compareTo(CLOSE_FUNDING_RATE) < 0) {
                 log.info("📉 {} 费率 {}% 低于平仓阈值，准备平仓...",
                         symbol,
-                        currentRate.abs().multiply(new BigDecimal("100")).setScale(4));
+                        currentRate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
                 closePosition(symbol);
                 currentPositionsCount--;
                 continue;
@@ -720,7 +719,7 @@ public class FundingArbitrageBot {
             if (position.isStopLossTriggered(STOP_LOSS_RATIO)) {
                 log.error("🚨 {} 触发止损！盈亏 {}%，强制平仓",
                         symbol,
-                        position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2));
+                        position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
                 closePosition(symbol);
                 currentPositionsCount--;
                 continue;
@@ -730,7 +729,7 @@ public class FundingArbitrageBot {
             if (position.isTakeProfitTriggered(TAKE_PROFIT_RATIO)) {
                 log.info("🎯 {} 触发止盈！盈亏 {}%，主动平仓",
                         symbol,
-                        position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2));
+                        position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
                 closePosition(symbol);
                 currentPositionsCount--;
             }
@@ -744,7 +743,7 @@ public class FundingArbitrageBot {
             // P2 修复：跳过无效的异常费率数据
             if (rate.compareTo(MIN_VALID_RATE) < 0 || rate.compareTo(MAX_VALID_RATE) > 0) {
                 log.warn("⚠️ {} 费率 {}% 异常，跳过", symbol,
-                        rate.multiply(new BigDecimal("100")).setScale(4));
+                        rate.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
                 continue;
             }
 
@@ -780,7 +779,7 @@ public class FundingArbitrageBot {
 
             if (!position.hasPosition() && currentPositionsCount < maxPositions) {
                 log.info("🎯 {} 费率 {}% 达标，准备开仓...",
-                        symbol, rate.abs().multiply(new BigDecimal("100")).setScale(4));
+                        symbol, rate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
                 openPosition(symbol, rate);
                 currentPositionsCount++;
             } else if (!position.hasPosition() && currentPositionsCount >= maxPositions) {
@@ -795,10 +794,10 @@ public class FundingArbitrageBot {
                     if (toClose.isSwitchWorthIt(rate.abs(), SWITCH_THRESHOLD, FEE_PER_TRADE)) {
                         log.info("🔄 移仓：从 {} ({}%) 到 {} ({}%), 差值 {}% + 手续费划算",
                                 toClose.getSymbol(),
-                                toClose.getLastFundingRate().abs().multiply(new BigDecimal("100")).setScale(4),
+                                toClose.getLastFundingRate().abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
                                 symbol,
-                                rate.abs().multiply(new BigDecimal("100")).setScale(4),
-                                diff.multiply(new BigDecimal("100")).setScale(4));
+                                rate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
+                                diff.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
                         closePosition(toClose.getSymbol());
                         openPosition(symbol, rate);
                     } else {
@@ -893,9 +892,9 @@ public class FundingArbitrageBot {
             BigDecimal totalReturn = position.getTotalFundingEarned().add(closePnl);
 
             log.info("💵 平仓结算: 资金费收益{} USDT, 买卖盈亏{} USDT, 合计{} USDT (持仓{}小时, {}次结算)",
-                    position.getTotalFundingEarned().setScale(4),
-                    closePnl.setScale(4),
-                    totalReturn.setScale(4),
+                    position.getTotalFundingEarned().setScale(4, RoundingMode.HALF_UP),
+                    closePnl.setScale(4, RoundingMode.HALF_UP),
+                    totalReturn.setScale(4, RoundingMode.HALF_UP),
                     position.getHoldingHours(),
                     position.getFundingCount());
 
