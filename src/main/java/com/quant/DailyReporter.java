@@ -47,8 +47,14 @@ public class DailyReporter {
     private final Map<String, PositionSnapshot> positionSnapshots = new ConcurrentHashMap<>();
 
     private LocalDate currentDate;
+    private FeishuNotifier feishuNotifier;
 
     public DailyReporter() {
+        this(null);
+    }
+
+    public DailyReporter(FeishuNotifier feishuNotifier) {
+        this.feishuNotifier = feishuNotifier;
         this.currentDate = LocalDate.now();
         initReportDir();
         log.info("📝 自动日报生成器已启动");
@@ -69,7 +75,13 @@ public class DailyReporter {
         LocalDate today = LocalDate.now();
         if (!today.equals(currentDate)) {
             // 新的一天，生成昨天的日报
-            generateDailyReport(currentDate);
+            String report = generateDailyReport(currentDate);
+            
+            // 飞书推送日报
+            if (feishuNotifier != null) {
+                feishuNotifier.sendDailyReport(report);
+                log.info("📤 日报已推送到飞书");
+            }
             
             // 重置数据
             resetDailyStats();
@@ -154,8 +166,9 @@ public class DailyReporter {
 
     /**
      * 生成日报
+     * @return 日报内容字符串
      */
-    public void generateDailyReport(LocalDate date) {
+    public String generateDailyReport(LocalDate date) {
         String filename = REPORT_DIR + "/" + date.format(DATE_FORMAT) + ".md";
         
         StringBuilder report = new StringBuilder();
@@ -266,6 +279,8 @@ public class DailyReporter {
         } catch (IOException e) {
             log.error("❌ 生成日报失败: {}", e.getMessage(), e);
         }
+        
+        return report.toString();
     }
 
     /**

@@ -138,13 +138,13 @@ public class FundingArbitrageBot {
             persistence = new StrategyPersistence();
             log.info("✅ 持久化模块初始化");
 
-            // 3. 初始化日报生成器
-            dailyReporter = new DailyReporter();
-            log.info("✅ 自动日报生成器初始化");
-
-            // 4. 初始化飞书推送
+            // 3. 初始化飞书推送
             feishuNotifier = new FeishuNotifier();
             log.info("✅ 飞书推送模块初始化");
+
+            // 4. 初始化日报生成器（传入飞书推送用于日报通知）
+            dailyReporter = new DailyReporter(feishuNotifier);
+            log.info("✅ 自动日报生成器初始化");
 
             // 5. 初始化重试管理器
             retryManager = new RetryManager();

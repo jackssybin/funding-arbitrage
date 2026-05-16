@@ -110,7 +110,40 @@ public class FeishuNotifier {
      */
     public void sendDailyReport(String reportContent) {
         if (!enabled) return;
-        sendText(reportContent);
+        // 日报内容比较长，提取关键信息发送，避免消息过长
+        StringBuilder summary = new StringBuilder();
+        summary.append("📊 【每日收益报告】\n");
+        summary.append("━━━━━━━━━━━━━━━━\n");
+        
+        // 提取关键指标
+        String[] lines = reportContent.split("\n");
+        boolean inStats = false;
+        int count = 0;
+        for (String line : lines) {
+            if (line.contains("当日统计摘要")) {
+                inStats = true;
+                continue;
+            }
+            if (inStats && line.contains("|")) {
+                if (line.contains("开仓次数") || line.contains("平仓次数") || 
+                    line.contains("资金费收益") || line.contains("余额变动") ||
+                    line.contains("当前持仓数")) {
+                    // 格式化统计行
+                    String clean = line.replace("|", " ").trim();
+                    if (!clean.contains("指标") && !clean.contains("-")) {
+                        summary.append(clean).append("\n");
+                    }
+                }
+            }
+            if (inStats && line.contains("当前持仓详情")) {
+                break;
+            }
+        }
+        
+        summary.append("━━━━━━━━━━━━━━━━\n");
+        summary.append("💡 完整日报已保存到文件");
+        
+        sendText(summary.toString());
     }
 
     /**
