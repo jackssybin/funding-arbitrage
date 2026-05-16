@@ -39,21 +39,21 @@ public class FundingArbitrageBot {
     private static final Logger log = LoggerFactory.getLogger(FundingArbitrageBot.class);
     private static final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    // ========== 费率阈值（模拟盘大胆验证功能）==========
-    // 模拟盘：降低到 0.03%，先验证程序功能正常
-    private static final BigDecimal MIN_FUNDING_RATE_POSITIVE = new BigDecimal("0.0003"); // 正费率0.03%
-    private static final BigDecimal MIN_FUNDING_RATE_NEGATIVE = new BigDecimal("0.0005"); // 负费率0.05%
+    // ========== 费率阈值（优化后）==========
+    // 提高到 0.1%，只做高收益机会
+    private static final BigDecimal MIN_FUNDING_RATE_POSITIVE = new BigDecimal("0.0010"); // 正费率0.1%
+    private static final BigDecimal MIN_FUNDING_RATE_NEGATIVE = new BigDecimal("0.0015"); // 负费率0.15%
     
     // ========== 费率趋势预测（防止开在下降通道
     private static final int RATE_TREND_CHECK_MINUTES = 60; // 检查过去1小时费率趋势
     private static final BigDecimal RATE_DECREASING_THRESHOLD = new BigDecimal("0.7"); // 费率下降超过30%不开仓
-    private static final BigDecimal CLOSE_FUNDING_RATE = new BigDecimal("0.0002"); // 0.02% 平仓阈值
-    private static final BigDecimal SWITCH_THRESHOLD   = new BigDecimal("0.001");  // 0.10% 移仓阈值
+    private static final BigDecimal CLOSE_FUNDING_RATE = new BigDecimal("0.0005"); // 0.05% 平仓阈值
+    private static final BigDecimal SWITCH_THRESHOLD   = new BigDecimal("0.0015");  // 0.15% 移仓阈值
     private static final BigDecimal FEE_PER_TRADE      = new BigDecimal("0.003");  // 0.30% 手续费
     
-    // ========== 风控参数（优化：更严格的止损）==========
-    private static final BigDecimal STOP_LOSS_RATIO    = new BigDecimal("0.02");  // 2% 止损（之前5%太松）
-    private static final BigDecimal TAKE_PROFIT_RATIO  = new BigDecimal("0.03");  // 3% 止盈
+    // ========== 风控参数（优化：降低杠杆，放宽止损）==========
+    private static final BigDecimal STOP_LOSS_RATIO    = new BigDecimal("0.05");  // 5% 止损（给价格波动留出空间）
+    private static final BigDecimal TAKE_PROFIT_RATIO  = new BigDecimal("0.08");  // 8% 止盈
     
     // ========== 负费率风险控制 ==========
     private static final BigDecimal MAX_NEGATIVE_RATE  = new BigDecimal("-0.003"); // 低于-0.3%不做多（极端行情）
@@ -74,6 +74,7 @@ public class FundingArbitrageBot {
     private StrategyDashboard dashboard;           // Web仪表盘
     private RetryManager retryManager;             // 重试管理器
     private DailyReporter dailyReporter;           // 自动日报生成器
+    private FeishuNotifier feishuNotifier;         // 飞书推送
 
     // ========== 状态变量 ==========
     private final Map<String, Position> positions = new HashMap<>();
@@ -141,7 +142,11 @@ public class FundingArbitrageBot {
             dailyReporter = new DailyReporter();
             log.info("✅ 自动日报生成器初始化");
 
-            // 4. 初始化重试管理器
+            // 4. 初始化飞书推送
+            feishuNotifier = new FeishuNotifier();
+            log.info("✅ 飞书推送模块初始化");
+
+            // 5. 初始化重试管理器
             retryManager = new RetryManager();
             retryManager.start();
             log.info("✅ 重试管理器初始化");
@@ -327,6 +332,8 @@ public class FundingArbitrageBot {
                     currentRate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
                     position.getTotalFundingEarned().setScale(4, RoundingMode.HALF_UP),
                     position.getFundingCount());
+            // 飞书推送：资金费结算通知
+            feishuNotifier.sendFundingSettlement(position.getSymbol(), earning, currentRate, position.getFundingCount());
         }
         // 结算后保存状态
         persistence.saveState(positions, totalPnl, totalTrades);
@@ -858,6 +865,8 @@ public class FundingArbitrageBot {
             log.info("");
             log.info("🎉 开仓完成！ {} {} ({}), 预计年化 {}%", symbol, sideName, alignedQuantity, annualized);
             log.info("");
+            // 飞书推送：开仓通知
+            feishuNotifier.sendOpenPosition(symbol, sideName, alignedQuantity, fundingRate, annualized);
 
         } catch (Exception e) {
             log.error("❌ 开仓失败: {}", e.getMessage(), e);
@@ -911,6 +920,8 @@ public class FundingArbitrageBot {
             log.info("");
             log.info("✅ 平仓完成！");
             log.info("");
+            // 飞书推送：平仓通知
+            feishuNotifier.sendClosePosition(symbol, position.getTotalFundingEarned(), finalPnl, "费率降低/止盈止损");
 
         } catch (Exception e) {
             log.error("❌ 平仓失败: {}", e.getMessage(), e);

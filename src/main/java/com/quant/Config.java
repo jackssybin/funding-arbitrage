@@ -136,6 +136,10 @@ public class Config {
             getEnv("SIMULATION_MODE", "true")
     );
 
+    // ========== 飞书推送配置 ==========
+    public static final String FEISHU_WEBHOOK = getEnv("FEISHU_WEBHOOK", "");
+    public static final String NOTIFY_FREQUENCY = getEnv("NOTIFY_FREQUENCY", "daily");
+
     private static String getEnv(String key, String defaultValue) {
         String value = System.getenv(key);
         if (value != null && !value.isEmpty()) {
