@@ -712,32 +712,78 @@ public class FundingArbitrageBot {
                 log.warn("更新 {} 盈亏失败: {}", symbol, e.getMessage());
             }
 
-            // 检查费率是否低于平仓阈值
-            if (currentRate.abs().compareTo(CLOSE_FUNDING_RATE) < 0) {
-                log.info("📉 {} 费率 {}% 低于平仓阈值，准备平仓...",
-                        symbol,
-                        currentRate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
-                closePosition(symbol);
-                currentPositionsCount--;
-                continue;
+            // ========== 优化1: 结算时间感知 - 临近结算不轻易平仓 ==========
+            boolean nearFunding = position.isNearFundingTime();
+            boolean veryNearFunding = position.isVeryNearFundingTime();
+            
+            // 显示距离下次结算的时间
+            long hoursToFunding = position.getHoursToNextFunding();
+            String fundingHint = veryNearFunding ? " ⚠️ 1小时内结算！" : 
+                                  nearFunding ? " ⏰ 2小时内结算" : "";
+            
+            // ========== 优化2: 动态止损 - 显示安全垫状态 ==========
+            BigDecimal dynamicStopLoss = position.getDynamicStopLossRatio(STOP_LOSS_RATIO);
+            boolean principalSafe = position.isPrincipalSafe();
+            BigDecimal safetyBuffer = position.getSafetyBuffer();
+            
+            // 检查费率是否低于平仓阈值（临近结算时提高平仓门槛）
+            BigDecimal effectiveCloseRate = nearFunding ? 
+                    CLOSE_FUNDING_RATE.multiply(new BigDecimal("0.5")) : // 临近结算时，费率要低一半才平仓
+                    CLOSE_FUNDING_RATE;
+            
+            if (currentRate.abs().compareTo(effectiveCloseRate) < 0) {
+                // 临近结算时，除非费率特别低，否则等拿到资金费再平仓
+                if (veryNearFunding) {
+                    log.info("⏰ {} 费率低于阈值，但距离结算仅{}小时，等拿到资金费再平仓{}",
+                            symbol, hoursToFunding, fundingHint);
+                } else {
+                    log.info("📉 {} 费率 {}% 低于平仓阈值，准备平仓...{}",
+                            symbol,
+                            currentRate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
+                            fundingHint);
+                    closePosition(symbol, "费率降低");
+                    currentPositionsCount--;
+                    continue;
+                }
             }
 
-            // P2 修复：止损检查 - 强制平仓防止极端行情
+            // P2 修复：止损检查 - 动态止损（已赚资金费作为安全垫）
             if (position.isStopLossTriggered(STOP_LOSS_RATIO)) {
-                log.error("🚨 {} 触发止损！盈亏 {}%，强制平仓",
-                        symbol,
-                        position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
-                closePosition(symbol);
-                currentPositionsCount--;
-                continue;
+                // 如果本金是安全的（资金费覆盖浮亏），可以不止损
+                if (principalSafe) {
+                    log.info("🛡️  {} 触发原始止损{}%，但资金费安全垫已覆盖浮亏（缓冲{} USDT），继续持有{}",
+                            symbol,
+                            STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
+                            safetyBuffer.setScale(4, RoundingMode.HALF_UP),
+                            fundingHint);
+                } else if (veryNearFunding) {
+                    // 非常临近结算时，即使触发止损也再等等
+                    log.warn("⏰ {} 触发止损，但距离结算仅{}小时，先拿到资金费再平仓{}",
+                            symbol, hoursToFunding, fundingHint);
+                } else {
+                    log.error("🚨 {} 触发动态止损！原始{}% → 动态{}%，盈亏{}%，强制平仓{}",
+                            symbol,
+                            STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
+                            dynamicStopLoss.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
+                            position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
+                            fundingHint);
+                    closePosition(symbol, "触发止损");
+                    currentPositionsCount--;
+                    continue;
+                }
             }
 
-            // P2 修复：止盈检查 - 大行情主动止盈离场
-            if (position.isTakeProfitTriggered(TAKE_PROFIT_RATIO)) {
-                log.info("🎯 {} 触发止盈！盈亏 {}%，主动平仓",
+            // P2 修复：止盈检查 - 大行情主动止盈离场（临近结算时更宽松）
+            BigDecimal effectiveTakeProfit = nearFunding ?
+                    TAKE_PROFIT_RATIO.multiply(new BigDecimal("1.5")) : // 临近结算时止盈线提高50%
+                    TAKE_PROFIT_RATIO;
+            
+            if (position.isTakeProfitTriggered(effectiveTakeProfit)) {
+                log.info("🎯 {} 触发止盈！盈亏 {}%，主动平仓{}",
                         symbol,
-                        position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
-                closePosition(symbol);
+                        position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
+                        fundingHint);
+                closePosition(symbol, "触发止盈");
                 currentPositionsCount--;
             }
         }
@@ -797,18 +843,30 @@ public class FundingArbitrageBot {
 
                 if (toClose != null) {
                     BigDecimal diff = rate.abs().subtract(toClose.getLastFundingRate().abs());
-
-                    if (toClose.isSwitchWorthIt(rate.abs(), SWITCH_THRESHOLD, FEE_PER_TRADE)) {
-                        log.info("🔄 移仓：从 {} ({}%) 到 {} ({}%), 差值 {}% + 手续费划算",
+                    
+                    // ========== 优化3: 移仓成本测算 ==========
+                    Position.SwitchCostAnalysis costAnalysis = 
+                            toClose.analyzeSwitchCost(rate.abs(), SWITCH_THRESHOLD, FEE_PER_TRADE);
+                    
+                    // 临近结算时不轻易移仓
+                    boolean veryNearFunding = toClose.isVeryNearFundingTime();
+                    long hoursToFunding = toClose.getHoursToNextFunding();
+                    
+                    if (veryNearFunding) {
+                        log.info("⏰ {} 距离结算仅{}小时，不移仓，先拿到资金费", 
+                                toClose.getSymbol(), hoursToFunding);
+                    } else if (costAnalysis.worthIt) {
+                        log.info("🔄 移仓分析：{}", costAnalysis);
+                        log.info("🔄 移仓：从 {} ({}%) 到 {} ({}%), 差值 {}% 净收益为正，执行移仓",
                                 toClose.getSymbol(),
                                 toClose.getLastFundingRate().abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
                                 symbol,
                                 rate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
                                 diff.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
-                        closePosition(toClose.getSymbol());
+                        closePosition(toClose.getSymbol(), "移仓到更高费率币种");
                         openPosition(symbol, rate);
                     } else {
-                        log.debug("⏸️  {} 移仓不划算（持仓时间太短或费率差不够），跳过", symbol);
+                        log.info("⏸️  {} 移仓不划算：{}", symbol, costAnalysis);
                     }
                 }
             }
@@ -874,6 +932,10 @@ public class FundingArbitrageBot {
     }
 
     private void closePosition(String symbol) {
+        closePosition(symbol, "费率降低/止盈止损");
+    }
+    
+    private void closePosition(String symbol, String reason) {
         log.info("");
         log.info("┌──────────────────────────────────────────────────────────┐");
         log.info("│              📉 平仓操作（纯合约）                          │");
@@ -910,12 +972,19 @@ public class FundingArbitrageBot {
             // 加上资金费收益
             BigDecimal totalReturn = position.getTotalFundingEarned().add(closePnl);
 
-            log.info("💵 平仓结算: 资金费收益{} USDT, 买卖盈亏{} USDT, 合计{} USDT (持仓{}小时, {}次结算)",
+            // 动态止损相关信息
+            BigDecimal safetyBuffer = position.getSafetyBuffer();
+            boolean principalSafe = position.isPrincipalSafe();
+            
+            log.info("💵 平仓结算: 资金费收益{} USDT, 买卖盈亏{} USDT, 合计{} USDT (持仓{}小时, {}次结算, 安全垫{} USDT, 保本:{})",
                     position.getTotalFundingEarned().setScale(4, RoundingMode.HALF_UP),
                     closePnl.setScale(4, RoundingMode.HALF_UP),
                     totalReturn.setScale(4, RoundingMode.HALF_UP),
                     position.getHoldingHours(),
-                    position.getFundingCount());
+                    position.getFundingCount(),
+                    safetyBuffer.setScale(4, RoundingMode.HALF_UP),
+                    principalSafe ? "是✅" : "否❌");
+            log.info("📋 平仓原因: {}", reason);
 
             // 记录盈亏用于熔断机制
             recordClosePnl(totalReturn);
@@ -925,13 +994,13 @@ public class FundingArbitrageBot {
 
             // 日报记录平仓
             BigDecimal finalPnl = position.getUnrealizedPnl() != null ? position.getUnrealizedPnl() : BigDecimal.ZERO;
-            dailyReporter.recordClose(symbol, position.getTotalFundingEarned(), finalPnl, "费率降低/止盈止损");
+            dailyReporter.recordClose(symbol, position.getTotalFundingEarned(), finalPnl, reason);
 
             log.info("");
             log.info("✅ 平仓完成！");
             log.info("");
-            // 飞书推送：平仓通知
-            feishuNotifier.sendClosePosition(symbol, position.getTotalFundingEarned(), finalPnl, "费率降低/止盈止损");
+            // 飞书推送：平仓通知（带详细原因
+            feishuNotifier.sendClosePosition(symbol, position.getTotalFundingEarned(), finalPnl, reason);
 
         } catch (Exception e) {
             log.error("❌ 平仓失败: {}", e.getMessage(), e);

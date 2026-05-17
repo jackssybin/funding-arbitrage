@@ -3,6 +3,7 @@ import java.math.RoundingMode;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -71,20 +72,127 @@ public class Position {
     }
 
     /**
-     * 计算移仓是否划算（考虑手续费成本）
+     * ========== 优化3: 移仓成本测算 - 移仓前确保净收益为正 ==========
+     * 计算移仓的净收益预期（考虑所有成本）
+     */
+    public SwitchCostAnalysis analyzeSwitchCost(BigDecimal newRate, BigDecimal switchThreshold, BigDecimal feeCost) {
+        BigDecimal currentRate = this.lastFundingRate.abs();
+        BigDecimal rateDiff = newRate.subtract(currentRate);
+        
+        SwitchCostAnalysis result = new SwitchCostAnalysis();
+        result.currentRate = currentRate;
+        result.newRate = newRate;
+        result.rateDiff = rateDiff;
+        result.feeCost = feeCost;
+        
+        // 成本1：移仓手续费（双边）
+        result.totalCost = feeCost.multiply(new BigDecimal("2"));  // 开仓+平仓
+        
+        // 成本2：错过本次结算的机会成本
+        // 如果临近结算，这个成本很大
+        long hoursToNextFunding = getHoursToNextFunding();
+        if (hoursToNextFunding <= 2) {
+            // 2小时内要结算了，错过这次结算的成本 = 一次完整的资金费
+            result.missedFundingCost = currentRate;
+            result.totalCost = result.totalCost.add(currentRate);
+        } else if (hoursToNextFunding <= 4) {
+            // 4小时内结算，机会成本按比例计算
+            BigDecimal missedRatio = new BigDecimal(4 - hoursToNextFunding).divide(new BigDecimal("4"), 4, RoundingMode.HALF_UP);
+            result.missedFundingCost = currentRate.multiply(missedRatio);
+            result.totalCost = result.totalCost.add(result.missedFundingCost);
+        }
+        
+        // 预期收益：费率差 × 预计持仓时间（假设至少持仓2个结算周期=16小时）
+        // 预期每8小时收益 = 费率差
+        // 预期2个周期收益 = 费率差 × 2
+        result.expectedReturn = rateDiff.multiply(new BigDecimal("2"));
+        
+        // 净收益 = 预期收益 - 总成本
+        result.netReturn = result.expectedReturn.subtract(result.totalCost);
+        
+        // 是否划算：净收益 > 0，且满足最小阈值
+        result.worthIt = result.netReturn.compareTo(BigDecimal.ZERO) > 0 
+                && rateDiff.compareTo(switchThreshold) > 0
+                && getHoldingHours() >= 6;
+        
+        return result;
+    }
+    
+    /**
+     * 获取距离下一次资金费结算的小时数（UTC 0,8,16点）
+     */
+    public long getHoursToNextFunding() {
+        ZonedDateTime utcNow = ZonedDateTime.now(java.time.ZoneOffset.UTC);
+        int currentHour = utcNow.getHour();
+        
+        // 结算小时：0, 8, 16
+        int[] fundingHours = {0, 8, 16, 24};  // 24用于边界处理
+        
+        for (int fundingHour : fundingHours) {
+            if (fundingHour > currentHour) {
+                return fundingHour - currentHour;
+            }
+        }
+        // 如果当前是23点，下一次是0点（次日）
+        return 24 - currentHour;
+    }
+    
+    /**
+     * ========== 优化1: 结算时间感知 - 临近结算不轻易平仓/移仓 ==========
+     * 是否临近资金费结算时间（2小时内）
+     */
+    public boolean isNearFundingTime() {
+        long hoursToNext = getHoursToNextFunding();
+        return hoursToNext <= 2;
+    }
+    
+    /**
+     * 是否非常临近结算（1小时内）- 这个时间段绝对不移仓/平仓
+     */
+    public boolean isVeryNearFundingTime() {
+        long hoursToNext = getHoursToNextFunding();
+        return hoursToNext <= 1;
+    }
+    
+    /**
+     * 简化版移仓判断（向后兼容）
      */
     public boolean isSwitchWorthIt(BigDecimal newRate, BigDecimal switchThreshold, BigDecimal feeCost) {
-        BigDecimal currentRate = this.lastFundingRate.abs();
-        BigDecimal diff = newRate.subtract(currentRate).abs();
+        SwitchCostAnalysis analysis = analyzeSwitchCost(newRate, switchThreshold, feeCost);
         
-        // 至少持仓 6 小时才考虑移仓（至少接近下一个结算点）
-        if (getHoldingHours() < 6) {
+        // 临近结算时不移仓
+        if (isVeryNearFundingTime()) {
             return false;
         }
         
-        // 新费率必须比当前费率高出阈值 + 手续费成本才划算
-        // 原则：移仓后至少需要持仓 2 个结算周期才能回本，否则不划算
-        return diff.compareTo(switchThreshold.add(feeCost)) > 0;
+        return analysis.worthIt;
+    }
+    
+    /**
+     * 移仓成本分析结果
+     */
+    public static class SwitchCostAnalysis {
+        public BigDecimal currentRate;       // 当前费率
+        public BigDecimal newRate;           // 新费率
+        public BigDecimal rateDiff;          // 费率差
+        public BigDecimal feeCost;           // 单次手续费
+        public BigDecimal totalCost;         // 总成本（手续费+机会成本）
+        public BigDecimal missedFundingCost; // 错过结算的机会成本
+        public BigDecimal expectedReturn;    // 预期收益
+        public BigDecimal netReturn;         // 净收益
+        public boolean worthIt;              // 是否划算
+        
+        @Override
+        public String toString() {
+            return String.format(
+                "费率差:%.4f%%, 总成本:%.4f%%, 预期收益:%.4f%%, 净收益:%.4f%%, %s",
+                rateDiff.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
+                totalCost.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
+                expectedReturn.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
+                netReturn.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
+                worthIt ? "✅划算" : "❌不划算"
+            );
+        }
     }
 
     /**
@@ -134,11 +242,60 @@ public class Position {
     }
 
     /**
-     * 判断是否需要止损（亏损超过 5%）
+     * ========== 优化1: 动态止损 - 用已赚资金费做安全垫 ==========
+     * 计算动态止损比例：已赚资金费越多，止损越宽松
+     * 原则：确保不亏本金（资金费收益 >= 价格亏损时不止损）
+     */
+    public BigDecimal getDynamicStopLossRatio(BigDecimal baseStopLossRatio) {
+        if (totalFundingEarned == null || BigDecimal.ZERO.compareTo(totalFundingEarned) >= 0) {
+            return baseStopLossRatio;  // 还没赚到资金费，用原始止损
+        }
+        
+        // 仓位名义价值
+        BigDecimal notionalValue = positionSize.multiply(entryPrice);
+        if (BigDecimal.ZERO.compareTo(notionalValue) >= 0) {
+            return baseStopLossRatio;
+        }
+        
+        // 已赚资金费占仓位的比例 = 安全垫比例
+        BigDecimal safetyRatio = totalFundingEarned.divide(notionalValue, 6, RoundingMode.HALF_UP);
+        
+        // 动态止损 = 原始止损 + 安全垫
+        // 例如：原始止损5%，已赚3%资金费 → 动态止损8%
+        BigDecimal dynamicStopLoss = baseStopLossRatio.add(safetyRatio);
+        
+        // 最大不超过15%（防止极端情况）
+        BigDecimal maxStopLoss = new BigDecimal("0.15");
+        return dynamicStopLoss.compareTo(maxStopLoss) < 0 ? dynamicStopLoss : maxStopLoss;
+    }
+    
+    /**
+     * 是否触发止损（动态版本）
      */
     public boolean isStopLossTriggered(BigDecimal stopLossRatio) {
         if (unrealizedPnlRatio == null) return false;
-        return unrealizedPnlRatio.compareTo(stopLossRatio.negate()) < 0;
+        // 使用动态止损比例
+        BigDecimal dynamicStopLoss = getDynamicStopLossRatio(stopLossRatio);
+        return unrealizedPnlRatio.compareTo(dynamicStopLoss.negate()) < 0;
+    }
+    
+    /**
+     * 获取当前止损缓冲（已赚资金费 - 当前浮亏）
+     * 正数表示还安全，负数表示已经开始亏本金
+     */
+    public BigDecimal getSafetyBuffer() {
+        if (totalFundingEarned == null || unrealizedPnl == null) {
+            return BigDecimal.ZERO;
+        }
+        return totalFundingEarned.add(unrealizedPnl);
+    }
+    
+    /**
+     * 是否保本（已赚资金费覆盖当前浮亏）
+     */
+    public boolean isPrincipalSafe() {
+        BigDecimal buffer = getSafetyBuffer();
+        return buffer.compareTo(BigDecimal.ZERO) >= 0;
     }
 
     /**
