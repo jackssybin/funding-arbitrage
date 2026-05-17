@@ -171,6 +171,14 @@ public class Position {
     }
     
     /**
+     * 获取持仓分钟数（用于初期风控）
+     */
+    public long getHoldingMinutes() {
+        if (entryTime == null) return 0;
+        return java.time.Duration.between(entryTime, LocalDateTime.now()).toMinutes();
+    }
+    
+    /**
      * 简化版移仓判断（向后兼容）
      */
     public boolean isSwitchWorthIt(BigDecimal newRate, BigDecimal switchThreshold, BigDecimal feeCost) {
@@ -263,9 +271,13 @@ public class Position {
             this.unrealizedPnl = currentPrice.subtract(entryPrice).multiply(positionSize);
         }
         
-        // 盈亏比例 = 盈亏 / 名义价值
-        if (notionalValue.compareTo(BigDecimal.ZERO) > 0) {
-            this.unrealizedPnlRatio = this.unrealizedPnl.divide(notionalValue, 6, RoundingMode.HALF_UP);
+        // ✅ 修复：盈亏比例 = 盈亏 / 保证金（而不是名义价值）
+        // 保证金 = 名义价值 / 杠杆倍数
+        // 这样 5% 止损就是真实的 5% 保证金亏损
+        BigDecimal margin = notionalValue.divide(
+            BigDecimal.valueOf(com.quant.Config.LEVERAGE), 6, RoundingMode.HALF_UP);
+        if (margin.compareTo(BigDecimal.ZERO) > 0) {
+            this.unrealizedPnlRatio = this.unrealizedPnl.divide(margin, 6, RoundingMode.HALF_UP);
         } else {
             this.unrealizedPnlRatio = BigDecimal.ZERO;
         }
