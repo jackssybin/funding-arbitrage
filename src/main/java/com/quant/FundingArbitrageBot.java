@@ -893,40 +893,12 @@ public class FundingArbitrageBot {
 
             // P2 修复：止损检查 - 动态止损（已赚资金费作为安全垫）
             if (position.isStopLossTriggered(STOP_LOSS_RATIO)) {
-                // ========== 新增保护1：价格异常检测 ==========
-                // 10分钟内价格波动 > 15% 可能是数据异常，不止损
-                BigDecimal pnlPercent = position.getUnrealizedPnlRatio().abs();
-                long holdingMinutes = position.getHoldingMinutes();
-                if (holdingMinutes < 60 && pnlPercent.compareTo(new BigDecimal("0.15")) > 0) {
-                    log.warn("⚠️  {} 价格异常波动！持仓仅{}分钟，盈亏{}%，怀疑数据异常，跳过止损{}",
-                            symbol, holdingMinutes,
-                            pnlPercent.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
-                            fundingHint);
-                    continue;
-                }
-                
-                // ========== 新增保护2：持仓初期观察期 ==========
-                // 持仓前2小时，除非亏损 > 20%，否则不止损（给市场回调机会）
-                if (holdingMinutes < 120 && pnlPercent.compareTo(new BigDecimal("0.20")) < 0) {
-                    log.info("⏳ {} 持仓仅{}分钟，盈亏{}% < 20%观察期阈值，继续持有{}",
-                            symbol, holdingMinutes,
-                            pnlPercent.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
-                            fundingHint);
-                    continue;
-                }
-                
-                // ========== 新增保护3：本金安全检测 ==========
-                // 如果本金是安全的（资金费覆盖浮亏），可以不止损
                 if (principalSafe) {
                     log.info("🛡️  {} 触发原始止损{}%，但资金费安全垫已覆盖浮亏（缓冲{} USDT），继续持有{}",
                             symbol,
                             STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
                             safetyBuffer.setScale(4, RoundingMode.HALF_UP),
                             fundingHint);
-                } else if (veryNearFunding) {
-                    // ========== 新增保护4：临近结算保护 ==========
-                    log.warn("⏰ {} 触发止损，但距离结算仅{}小时，先拿到资金费再平仓{}",
-                            symbol, hoursToFunding, fundingHint);
                 } else {
                     log.error("🚨 {} 触发动态止损！原始{}% → 动态{}%，盈亏{}%，强制平仓{}",
                             symbol,

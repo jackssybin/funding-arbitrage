@@ -274,8 +274,7 @@ public class Position {
         // ✅ 修复：盈亏比例 = 盈亏 / 保证金（而不是名义价值）
         // 保证金 = 名义价值 / 杠杆倍数
         // 这样 5% 止损就是真实的 5% 保证金亏损
-        BigDecimal margin = notionalValue.divide(
-            BigDecimal.valueOf(com.quant.Config.LEVERAGE), 6, RoundingMode.HALF_UP);
+        BigDecimal margin = getMarginValue(notionalValue);
         if (margin.compareTo(BigDecimal.ZERO) > 0) {
             this.unrealizedPnlRatio = this.unrealizedPnl.divide(margin, 6, RoundingMode.HALF_UP);
         } else {
@@ -295,12 +294,13 @@ public class Position {
         
         // 仓位名义价值
         BigDecimal notionalValue = positionSize.multiply(entryPrice);
-        if (BigDecimal.ZERO.compareTo(notionalValue) >= 0) {
+        BigDecimal margin = getMarginValue(notionalValue);
+        if (BigDecimal.ZERO.compareTo(margin) >= 0) {
             return baseStopLossRatio;
         }
         
         // 已赚资金费占仓位的比例 = 安全垫比例
-        BigDecimal safetyRatio = totalFundingEarned.divide(notionalValue, 6, RoundingMode.HALF_UP);
+        BigDecimal safetyRatio = totalFundingEarned.divide(margin, 6, RoundingMode.HALF_UP);
         
         // 动态止损 = 原始止损 + 安全垫
         // 例如：原始止损5%，已赚3%资金费 → 动态止损8%
@@ -309,6 +309,17 @@ public class Position {
         // 最大不超过15%（防止极端情况）
         BigDecimal maxStopLoss = new BigDecimal("0.15");
         return dynamicStopLoss.compareTo(maxStopLoss) < 0 ? dynamicStopLoss : maxStopLoss;
+    }
+
+    public BigDecimal getMarginValue() {
+        return getMarginValue(positionSize.multiply(entryPrice));
+    }
+
+    private BigDecimal getMarginValue(BigDecimal notionalValue) {
+        if (notionalValue == null || BigDecimal.ZERO.compareTo(notionalValue) >= 0 || Config.LEVERAGE <= 0) {
+            return BigDecimal.ZERO;
+        }
+        return notionalValue.divide(BigDecimal.valueOf(Config.LEVERAGE), 6, RoundingMode.HALF_UP);
     }
     
     /**

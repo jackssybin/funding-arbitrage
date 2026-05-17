@@ -49,6 +49,8 @@ Thumbs.db
 .env.*.local
 *.log
 logs/
+data/strategy_state.json
+pid.txt
 
 # ================================
 # Other

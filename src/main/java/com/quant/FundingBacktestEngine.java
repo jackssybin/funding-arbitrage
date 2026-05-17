@@ -60,7 +60,7 @@ public class FundingBacktestEngine {
 
             if (position == null && bar.fundingRate.abs().compareTo(config.openRate) >= 0) {
                 String side = bar.fundingRate.compareTo(BigDecimal.ZERO) >= 0 ? "SHORT" : "LONG";
-                position = new BacktestPosition(bar.symbol, side, bar.price, config.notional);
+                position = new BacktestPosition(bar.symbol, side, bar.price, config.notional, config.leverage);
                 cashPnl = cashPnl.subtract(config.oneWayFee(config.notional));
                 trades++;
             }
@@ -122,6 +122,7 @@ public class FundingBacktestEngine {
         public BigDecimal closeRate = new BigDecimal("0.0005");
         public BigDecimal takerFeeRate = new BigDecimal("0.0005");
         public BigDecimal stopLossRatio = new BigDecimal("0.05");
+        public int leverage = Config.LEVERAGE;
 
         BigDecimal oneWayFee(BigDecimal notionalValue) {
             return notionalValue.multiply(takerFeeRate);
@@ -144,12 +145,14 @@ public class FundingBacktestEngine {
         private final String side;
         private final BigDecimal entryPrice;
         private final BigDecimal notional;
+        private final int leverage;
 
-        BacktestPosition(String symbol, String side, BigDecimal entryPrice, BigDecimal notional) {
+        BacktestPosition(String symbol, String side, BigDecimal entryPrice, BigDecimal notional, int leverage) {
             this.symbol = symbol;
             this.side = side;
             this.entryPrice = entryPrice;
             this.notional = notional;
+            this.leverage = leverage;
         }
 
         BigDecimal unrealizedPnl(BigDecimal currentPrice) {
@@ -161,7 +164,14 @@ public class FundingBacktestEngine {
         }
 
         BigDecimal unrealizedPnlRatio(BigDecimal currentPrice) {
-            return unrealizedPnl(currentPrice).divide(notional, 8, RoundingMode.HALF_UP);
+            if (leverage <= 0) {
+                return BigDecimal.ZERO;
+            }
+            BigDecimal margin = notional.divide(BigDecimal.valueOf(leverage), 8, RoundingMode.HALF_UP);
+            if (BigDecimal.ZERO.compareTo(margin) >= 0) {
+                return BigDecimal.ZERO;
+            }
+            return unrealizedPnl(currentPrice).divide(margin, 8, RoundingMode.HALF_UP);
         }
     }
 }
