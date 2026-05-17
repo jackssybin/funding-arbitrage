@@ -168,6 +168,44 @@ public class OkxClient implements ExchangeClient {
         return getPositionAmount(symbol);
     }
 
+    @Override
+    public List<FundingIncomeRecord> getFundingIncomeRecords(String symbol, long startTimeMillis, long endTimeMillis)
+            throws IOException {
+        List<FundingIncomeRecord> records = new ArrayList<FundingIncomeRecord>();
+
+        if (Config.SIMULATION_MODE) {
+            return records;
+        }
+
+        String instId = toOkxInstId(symbol);
+        String path = "/api/v5/account/bills?instType=SWAP&instId=" + instId
+                + "&begin=" + startTimeMillis
+                + "&end=" + endTimeMillis;
+
+        Request request = buildSignedRequest("GET", path, "");
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = checkResponse(response, "查询资金费账单");
+            JsonNode json = mapper.readTree(body);
+            JsonNode data = json.get("data");
+            if (data == null) {
+                return records;
+            }
+
+            for (JsonNode item : data) {
+                String subType = item.has("subType") ? item.get("subType").asText() : "";
+                if (!"173".equals(subType) && !"174".equals(subType)) {
+                    continue;
+                }
+                BigDecimal income = new BigDecimal(item.get("balChg").asText("0"));
+                long time = item.get("ts").asLong();
+                String billId = item.has("billId") ? item.get("billId").asText() : instId + "-" + time;
+                records.add(new FundingIncomeRecord(symbol, income, time, billId));
+            }
+        }
+
+        return records;
+    }
+
     // ===================================================================
     // 合约接口（需要签名）
     // ===================================================================

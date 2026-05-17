@@ -12,6 +12,8 @@ import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -279,6 +281,48 @@ public class BinanceFuturesClient implements ExchangeClient {
             }
             return BigDecimal.ZERO;
         }
+    }
+
+    @Override
+    public List<FundingIncomeRecord> getFundingIncomeRecords(String symbol, long startTimeMillis, long endTimeMillis)
+            throws IOException {
+        List<FundingIncomeRecord> records = new ArrayList<>();
+
+        if (Config.SIMULATION_MODE) {
+            return records;
+        }
+
+        long timestamp = System.currentTimeMillis();
+        String params = "symbol=" + symbol
+                + "&incomeType=FUNDING_FEE"
+                + "&startTime=" + startTimeMillis
+                + "&endTime=" + endTimeMillis
+                + "&timestamp=" + timestamp;
+        String signature = sign(params);
+        String url = baseUrl + "/fapi/v1/income?" + params + "&signature=" + signature;
+
+        Request request = new Request.Builder()
+                .url(url)
+                .header("X-MBX-APIKEY", apiKey)
+                .get()
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            String responseBody = response.body().string();
+            if (!response.isSuccessful()) {
+                throw new IOException("获取资金费账单失败: " + responseBody);
+            }
+
+            JsonNode array = mapper.readTree(responseBody);
+            for (JsonNode item : array) {
+                BigDecimal income = new BigDecimal(item.get("income").asText());
+                long time = item.get("time").asLong();
+                String tranId = item.has("tranId") ? item.get("tranId").asText() : symbol + "-" + time;
+                records.add(new FundingIncomeRecord(symbol, income, time, tranId));
+            }
+        }
+
+        return records;
     }
 
     /**

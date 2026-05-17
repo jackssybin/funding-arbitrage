@@ -105,7 +105,7 @@ public class SmartOrderExecutor {
                                        String side, String sideName, boolean isClose) throws IOException {
         log.info("🤖 智能合约{} {}: 总量 {}", sideName, symbol, totalQuantity);
 
-        if (Config.SIMULATION_MODE) {
+        if (isSimulationMode()) {
             log.info("[模拟模式] {} 成功: {}", sideName, symbol);
             return "SIM_" + System.currentTimeMillis();
         }
@@ -119,7 +119,10 @@ public class SmartOrderExecutor {
                     return executeWithRetryHandling("平多 " + symbol, () -> client.closeLong(symbol, totalQuantity));
                 }
             } else {
-                return executeWithRetryHandling("开仓 " + symbol, () -> client.openLong(symbol, totalQuantity));
+                if ("SELL".equals(side)) {
+                    return executeWithRetryHandling("开空 " + symbol, () -> client.openShort(symbol, totalQuantity));
+                }
+                return executeWithRetryHandling("开多 " + symbol, () -> client.openLong(symbol, totalQuantity));
             }
         }
 
@@ -135,7 +138,10 @@ public class SmartOrderExecutor {
                     return executeWithRetryHandling("平多 " + symbol, () -> client.closeLong(symbol, totalQuantity));
                 }
             } else {
-                return executeWithRetryHandling("开仓 " + symbol, () -> client.openLong(symbol, totalQuantity));
+                if ("SELL".equals(side)) {
+                    return executeWithRetryHandling("开空 " + symbol, () -> client.openShort(symbol, totalQuantity));
+                }
+                return executeWithRetryHandling("开多 " + symbol, () -> client.openLong(symbol, totalQuantity));
             }
         }
 
@@ -163,7 +169,11 @@ public class SmartOrderExecutor {
                     orderId = executeWithRetryHandling("平多拆单 " + symbol, () -> client.closeLong(symbol, thisQty));
                 }
             } else {
-                orderId = executeWithRetryHandling("开仓拆单 " + symbol, () -> client.openLong(symbol, thisQty));
+                if ("SELL".equals(side)) {
+                    orderId = executeWithRetryHandling("开空拆单 " + symbol, () -> client.openShort(symbol, thisQty));
+                } else {
+                    orderId = executeWithRetryHandling("开多拆单 " + symbol, () -> client.openLong(symbol, thisQty));
+                }
             }
             orderIds.add(orderId);
 
@@ -189,7 +199,7 @@ public class SmartOrderExecutor {
      */
     private BigDecimal getMaxOrderQuantityFromDepth(String symbol, String side) throws IOException {
         // 如果是模拟模式，返回一个足够大的值（不拆单）
-        if (Config.SIMULATION_MODE) {
+        if (isSimulationMode()) {
             return new BigDecimal("999999");
         }
 
@@ -202,5 +212,9 @@ public class SmartOrderExecutor {
             log.warn("获取盘口深度失败，使用默认值: {}", e.getMessage());
             return new BigDecimal("999999");
         }
+    }
+
+    protected boolean isSimulationMode() {
+        return Config.SIMULATION_MODE;
     }
 }

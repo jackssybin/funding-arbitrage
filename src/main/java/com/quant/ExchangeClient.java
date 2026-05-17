@@ -28,6 +28,15 @@ public interface ExchangeClient {
     /** 获取当前持仓（兼容不同交易所） */
     BigDecimal getCurrentPosition(String symbol) throws IOException;
 
+    /**
+     * 获取指定时间范围内的真实资金费账单。
+     * 返回值以交易所实际入账方向为准：正数表示收入，负数表示支出。
+     */
+    default List<FundingIncomeRecord> getFundingIncomeRecords(String symbol, long startTimeMillis, long endTimeMillis)
+            throws IOException {
+        return java.util.Collections.emptyList();
+    }
+
     // ===== 合约操作 =====
 
     /** 设置杠杆倍数 */

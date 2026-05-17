@@ -62,6 +62,7 @@ public class FundingArbitrageBot {
     // ========== 结算时间（UTC 0, 8, 16 点） ==========
     private static final List<Integer> FUNDING_HOURS = Arrays.asList(0, 8, 16);
     private volatile int lastSettledHourUtc = -1;
+    private volatile long lastFundingIncomeQueryTime = 0L;
 
     // ========== 核心组件 ==========
     private ExchangeClient exchangeClient;
@@ -312,10 +313,11 @@ public class FundingArbitrageBot {
             if (!position.hasPosition()) continue;
 
             BigDecimal currentRate = fundingRates.getOrDefault(position.getSymbol(), position.getLastFundingRate());
-            BigDecimal notionalValue = position.getPositionSize().multiply(position.getEntryPrice());
-            BigDecimal earning = notionalValue
-                    .multiply(currentRate.abs())
-                    .setScale(6, RoundingMode.HALF_UP);
+            BigDecimal earning = getActualFundingIncome(position, currentRate);
+            if (earning.compareTo(BigDecimal.ZERO) == 0) {
+                log.info("⏸️  {} 本窗口未查询到新的真实资金费入账，跳过记账", position.getSymbol());
+                continue;
+            }
 
             position.recordFundingSettlement(earning);
             position.setLastFundingRate(currentRate);
@@ -335,8 +337,41 @@ public class FundingArbitrageBot {
             // 飞书推送：资金费结算通知
             feishuNotifier.sendFundingSettlement(position.getSymbol(), earning, currentRate, position.getFundingCount());
         }
+        lastFundingIncomeQueryTime = System.currentTimeMillis();
         // 结算后保存状态
         persistence.saveState(positions, totalPnl, totalTrades);
+    }
+
+    private BigDecimal getActualFundingIncome(Position position, BigDecimal currentRate) {
+        if (Config.SIMULATION_MODE) {
+            return estimateFundingIncome(position, currentRate);
+        }
+
+        long now = System.currentTimeMillis();
+        long startTime = lastFundingIncomeQueryTime > 0
+                ? lastFundingIncomeQueryTime + 1
+                : now - 2 * 60 * 60 * 1000L;
+
+        try {
+            List<FundingIncomeRecord> records = exchangeClient.getFundingIncomeRecords(
+                    position.getSymbol(), startTime, now);
+            BigDecimal actualIncome = BigDecimal.ZERO;
+            for (FundingIncomeRecord record : records) {
+                actualIncome = actualIncome.add(record.getIncome());
+            }
+            return actualIncome.setScale(6, RoundingMode.HALF_UP);
+        } catch (Exception e) {
+            log.error("❌ 查询 {} 真实资金费账单失败，本轮不做本地估算记账: {}",
+                    position.getSymbol(), e.getMessage());
+            return BigDecimal.ZERO;
+        }
+    }
+
+    private BigDecimal estimateFundingIncome(Position position, BigDecimal currentRate) {
+        BigDecimal notionalValue = position.getPositionSize().multiply(position.getEntryPrice());
+        return notionalValue
+                .multiply(currentRate.abs())
+                .setScale(6, RoundingMode.HALF_UP);
     }
 
     /**
@@ -949,8 +984,7 @@ public class FundingArbitrageBot {
             BigDecimal alignedQuantity = precision.alignQuantity(symbol, position.getPositionSize());
 
             String side = position.getPositionSide();
-            String closeSide = "LONG".equals(side) ? "SELL" : "BUY";
-            AtomicTransactionManager.TxResult result = txManager.atomicClosePosition(symbol, alignedQuantity, closeSide);
+            AtomicTransactionManager.TxResult result = txManager.atomicClosePosition(symbol, alignedQuantity, side);
             if (!result.isSuccess()) {
                 try {
                     BigDecimal actualPos = exchangeClient.getCurrentPosition(symbol);
