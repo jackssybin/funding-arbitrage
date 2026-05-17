@@ -136,7 +136,7 @@ public class StrategyPersistence {
      * 记录资金费结算
      */
     public void recordFunding(String symbol, BigDecimal earning, BigDecimal rate) {
-        String line = String.format("%s,FUNDING,%s,,,.%.6f,%.4f,\n",
+        String line = String.format("%s,FUNDING,%s,,,%.6f,%.4f,\n",
                 LocalDateTime.now().format(dtf),
                 symbol, rate, earning);
         appendToCsv(line);

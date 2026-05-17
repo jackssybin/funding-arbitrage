@@ -504,10 +504,11 @@ public class FundingArbitrageBot {
     }
 
     /**
-     * 记录一次平仓盈亏，更新熔断状态
+     * 记录一次平仓盈亏，更新熔断状态和总收益
      */
     private void recordClosePnl(BigDecimal pnl) {
         dailyPnl = dailyPnl.add(pnl);
+        totalPnl = totalPnl.add(pnl);  // ✅ 修复：平仓盈亏也要计入总收益
         if (pnl.compareTo(BigDecimal.ZERO) < 0) {
             consecutiveLosses++;
         } else {
@@ -965,21 +966,21 @@ public class FundingArbitrageBot {
             }
 
             // 计算平仓盈亏（浮盈浮亏实现化）
+            // ⚠️ 注意：资金费收益已经在每次结算时加到totalPnl中了，这里只加买卖盈亏！
             BigDecimal closePnl = BigDecimal.ZERO;
             if (position.getUnrealizedPnl() != null) {
                 closePnl = position.getUnrealizedPnl();
             }
-            // 加上资金费收益
-            BigDecimal totalReturn = position.getTotalFundingEarned().add(closePnl);
+            // 只计算买卖盈亏（资金费已经在结算时统计过了）
+            BigDecimal totalReturn = closePnl;
 
             // 动态止损相关信息
             BigDecimal safetyBuffer = position.getSafetyBuffer();
             boolean principalSafe = position.isPrincipalSafe();
             
-            log.info("💵 平仓结算: 资金费收益{} USDT, 买卖盈亏{} USDT, 合计{} USDT (持仓{}小时, {}次结算, 安全垫{} USDT, 保本:{})",
+            log.info("💵 平仓结算: 资金费收益{} USDT(已累计), 本次买卖盈亏{} USDT (持仓{}小时, {}次结算, 安全垫{} USDT, 保本:{})",
                     position.getTotalFundingEarned().setScale(4, RoundingMode.HALF_UP),
                     closePnl.setScale(4, RoundingMode.HALF_UP),
-                    totalReturn.setScale(4, RoundingMode.HALF_UP),
                     position.getHoldingHours(),
                     position.getFundingCount(),
                     safetyBuffer.setScale(4, RoundingMode.HALF_UP),
