@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
 
 /**
  * 智能下单引擎 - 纯合约版本（支持 Binance / OKX）
@@ -73,6 +74,24 @@ public class SmartOrderExecutor {
 
     // ========== 核心执行逻辑 ==========
 
+    private String executeWithRetryHandling(String opName, Callable<String> apiCall) throws IOException {
+        if (retryManager == null) {
+            try { return apiCall.call(); }
+            catch (Exception e) { throw new IOException(e); }
+        }
+        try {
+            return retryManager.executeWithRetry(opName, () -> {
+                try {
+                    return apiCall.call();
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        } catch (RuntimeException re) {
+            throw new IOException(re.getMessage(), re.getCause());
+        }
+    }
+
     /**
      * 执行智能下单，自动拆单
      * 
@@ -95,12 +114,12 @@ public class SmartOrderExecutor {
         if (client instanceof OkxClient) {
             if (isClose) {
                 if ("BUY".equals(side)) {
-                    return client.closeShort(symbol, totalQuantity);
+                    return executeWithRetryHandling("平空 " + symbol, () -> client.closeShort(symbol, totalQuantity));
                 } else {
-                    return client.closeLong(symbol, totalQuantity);
+                    return executeWithRetryHandling("平多 " + symbol, () -> client.closeLong(symbol, totalQuantity));
                 }
             } else {
-                return client.openLong(symbol, totalQuantity);
+                return executeWithRetryHandling("开仓 " + symbol, () -> client.openLong(symbol, totalQuantity));
             }
         }
 
@@ -111,12 +130,12 @@ public class SmartOrderExecutor {
             log.info("✅ 订单量 {} 小于盘口深度 {}，直接一笔成交", totalQuantity, maxPerOrder);
             if (isClose) {
                 if ("BUY".equals(side)) {
-                    return client.closeShort(symbol, totalQuantity);
+                    return executeWithRetryHandling("平空 " + symbol, () -> client.closeShort(symbol, totalQuantity));
                 } else {
-                    return client.closeLong(symbol, totalQuantity);
+                    return executeWithRetryHandling("平多 " + symbol, () -> client.closeLong(symbol, totalQuantity));
                 }
             } else {
-                return client.openLong(symbol, totalQuantity);
+                return executeWithRetryHandling("开仓 " + symbol, () -> client.openLong(symbol, totalQuantity));
             }
         }
 
@@ -127,8 +146,8 @@ public class SmartOrderExecutor {
         int orderIndex = 1;
 
         while (remaining.compareTo(BigDecimal.ZERO) > 0) {
-            BigDecimal thisQty = remaining.min(maxPerOrder);
-            thisQty = precision.alignQuantity(symbol, thisQty);
+            BigDecimal rawQty = remaining.min(maxPerOrder);
+            final BigDecimal thisQty = precision.alignQuantity(symbol, rawQty);
 
             if (thisQty.compareTo(BigDecimal.ZERO) <= 0) {
                 break;
@@ -139,12 +158,12 @@ public class SmartOrderExecutor {
             String orderId;
             if (isClose) {
                 if ("BUY".equals(side)) {
-                    orderId = client.closeShort(symbol, thisQty);
+                    orderId = executeWithRetryHandling("平空拆单 " + symbol, () -> client.closeShort(symbol, thisQty));
                 } else {
-                    orderId = client.closeLong(symbol, thisQty);
+                    orderId = executeWithRetryHandling("平多拆单 " + symbol, () -> client.closeLong(symbol, thisQty));
                 }
             } else {
-                orderId = client.openLong(symbol, thisQty);  // Bug-6修复: 多头应调 openLong
+                orderId = executeWithRetryHandling("开仓拆单 " + symbol, () -> client.openLong(symbol, thisQty));
             }
             orderIds.add(orderId);
 

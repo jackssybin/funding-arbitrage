@@ -138,52 +138,41 @@ public class AtomicTransactionManager {
      * 执行操作（带重试）
      */
     private boolean executeOperationWithRetry(TxOperation op, String side) {
-        for (int attempt = 1; attempt <= MAX_RETRY; attempt++) {
-            try {
-                log.info("执行 {} (第 {} 次尝试)...", op, attempt);
+        try {
+            log.info("执行 {} ...", op);
 
-                if ("FUTURES_OPEN".equals(op.type)) {
-                    String orderId;
-                    if ("SELL".equals(side)) {
-                        orderId = smartOrderExecutor.smartOpenShort(op.symbol, op.quantity);
-                    } else {
-                        orderId = smartOrderExecutor.smartOpenLong(op.symbol, op.quantity);
-                    }
-                    op.orderId = orderId;
-                    op.status = "SUCCESS";
-                    log.info("✅ 开仓订单执行成功: {}", orderId);
-                    return true;
-                } else if ("FUTURES_CLOSE".equals(op.type)) {
-                    String orderId;
-                    if ("BUY".equals(side)) {
-                        // 平空：SELL -> BUY back
-                        orderId = smartOrderExecutor.smartCloseShort(op.symbol, op.quantity);
-                    } else {
-                        // 平多：BUY -> SELL back
-                        orderId = smartOrderExecutor.smartCloseLong(op.symbol, op.quantity);
-                    }
-                    op.orderId = orderId;
-                    op.status = "SUCCESS";
-                    log.info("✅ 平仓订单执行成功: {}", orderId);
-                    return true;
+            if ("FUTURES_OPEN".equals(op.type)) {
+                String orderId;
+                if ("SELL".equals(side)) {
+                    orderId = smartOrderExecutor.smartOpenShort(op.symbol, op.quantity);
+                } else {
+                    orderId = smartOrderExecutor.smartOpenLong(op.symbol, op.quantity);
                 }
-
-            } catch (Exception e) {
-                op.errorMsg = e.getMessage();
-                log.warn("❌ {} 失败 (第 {} 次): {}", op.type, attempt, e.getMessage());
-
-                if (attempt < MAX_RETRY) {
-                    try {
-                        Thread.sleep(RETRY_DELAY_MS);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                    }
+                op.orderId = orderId;
+                op.status = "SUCCESS";
+                log.info("✅ 开仓订单执行成功: {}", orderId);
+                return true;
+            } else if ("FUTURES_CLOSE".equals(op.type)) {
+                String orderId;
+                if ("BUY".equals(side)) {
+                    // 平空：SELL -> BUY back
+                    orderId = smartOrderExecutor.smartCloseShort(op.symbol, op.quantity);
+                } else {
+                    // 平多：BUY -> SELL back
+                    orderId = smartOrderExecutor.smartCloseLong(op.symbol, op.quantity);
                 }
+                op.orderId = orderId;
+                op.status = "SUCCESS";
+                log.info("✅ 平仓订单执行成功: {}", orderId);
+                return true;
             }
+
+        } catch (Exception e) {
+            op.errorMsg = e.getMessage();
+            log.warn("❌ {} 执行失败: {}", op.type, e.getMessage());
         }
 
         op.status = "FAILED";
-        log.error("❌ {} 重试 {} 次全部失败!", op.type, MAX_RETRY);
         return false;
     }
 

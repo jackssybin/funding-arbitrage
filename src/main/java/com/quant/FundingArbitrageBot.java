@@ -888,8 +888,18 @@ public class FundingArbitrageBot {
             String side = position.getPositionSide();
             String closeSide = "LONG".equals(side) ? "SELL" : "BUY";
             AtomicTransactionManager.TxResult result = txManager.atomicClosePosition(symbol, alignedQuantity, closeSide);
-            if (!result.isSuccess() && result.isDangerous()) {
-                throw new IOException("⚠️ 平仓异常: " + result.message);
+            if (!result.isSuccess()) {
+                try {
+                    BigDecimal actualPos = exchangeClient.getCurrentPosition(symbol);
+                    if (actualPos.abs().compareTo(BigDecimal.valueOf(0.001)) <= 0) {
+                        log.info("✅ 交易所实际已无持仓，可能是后台重试成功或触发交易所平仓，将同步清理本地状态。");
+                    } else {
+                        throw new IOException("⚠️ 平仓失败（交易所未成交）: " + result.message);
+                    }
+                } catch (Exception ex) {
+                    if (ex instanceof IOException) throw (IOException) ex;
+                    throw new IOException("⚠️ 平仓失败且无法验证真实仓位: " + result.message);
+                }
             }
 
             // 计算平仓盈亏（浮盈浮亏实现化）
