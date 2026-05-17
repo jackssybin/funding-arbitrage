@@ -44,7 +44,7 @@ mkdir -p data
 if [ "$1" = "build" ] || [ ! -f "target/funding-arbitrage-1.0.0.jar" ]; then
     echo ""
     echo "[3/4] 编译打包..."
-    mvn package -DskipTests -q
+    mvn package -q
     if [ $? -ne 0 ]; then
         echo "❌ 编译失败，退出"
         exit 1

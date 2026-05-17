@@ -38,6 +38,7 @@ public class FundingArbitrageBot {
 
     private static final Logger log = LoggerFactory.getLogger(FundingArbitrageBot.class);
     private static final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private static final long FUNDING_INCOME_LOOKBACK_MS = 12 * 60 * 60 * 1000L;
 
     // ========== 费率阈值（优化后）==========
     // 提高到 0.1%，只做高收益机会
@@ -63,6 +64,7 @@ public class FundingArbitrageBot {
     private static final List<Integer> FUNDING_HOURS = Arrays.asList(0, 8, 16);
     private volatile int lastSettledHourUtc = -1;
     private volatile long lastFundingIncomeQueryTime = 0L;
+    private final Map<String, Long> lastFundingIncomeQueryTimes = new HashMap<>();
 
     // ========== 核心组件 ==========
     private ExchangeClient exchangeClient;
@@ -86,6 +88,7 @@ public class FundingArbitrageBot {
     // ========== 风控熔断机制 ==========
     private volatile int consecutiveLosses = 0;  // 连续亏损次数
     private volatile BigDecimal dailyPnl = BigDecimal.ZERO;  // 当日盈亏
+    private volatile LocalDateTime dailyPnlDate = LocalDateTime.now();
     private static final int MAX_CONSECUTIVE_LOSSES = 3;  // 最多连续亏损3次
     private static final BigDecimal MAX_DAILY_LOSS_AMOUNT = new BigDecimal("500");  // 单日最大亏损500USDT
     private static final BigDecimal MAX_NET_EXPOSURE = new BigDecimal("0.5");  // 最大净敞口50%
@@ -202,6 +205,9 @@ public class FundingArbitrageBot {
             if (savedState != null) {
                 totalPnl = BigDecimal.valueOf(savedState.totalPnl);
                 totalTrades = savedState.totalTrades;
+                lastFundingIncomeQueryTime = savedState.lastFundingIncomeQueryTime;
+                restoreFundingIncomeQueryTimes(savedState);
+                restorePositions(savedState);
                 log.info("✅ 已恢复历史收益: {} USDT, 交易次数: {}", savedState.totalPnl, savedState.totalTrades);
             }
 
@@ -309,11 +315,17 @@ public class FundingArbitrageBot {
     }
 
     private void settleFundingFee() {
+        long now = System.currentTimeMillis();
+
         for (Position position : positions.values()) {
             if (!position.hasPosition()) continue;
 
             BigDecimal currentRate = fundingRates.getOrDefault(position.getSymbol(), position.getLastFundingRate());
-            BigDecimal earning = getActualFundingIncome(position, currentRate);
+            FundingIncomeResult incomeResult = getActualFundingIncome(position, currentRate, now);
+            BigDecimal earning = incomeResult.income;
+            if (incomeResult.maxRecordTime > getLastFundingIncomeQueryTime(position.getSymbol())) {
+                lastFundingIncomeQueryTimes.put(position.getSymbol(), incomeResult.maxRecordTime);
+            }
             if (earning.compareTo(BigDecimal.ZERO) == 0) {
                 log.info("⏸️  {} 本窗口未查询到新的真实资金费入账，跳过记账", position.getSymbol());
                 continue;
@@ -337,34 +349,48 @@ public class FundingArbitrageBot {
             // 飞书推送：资金费结算通知
             feishuNotifier.sendFundingSettlement(position.getSymbol(), earning, currentRate, position.getFundingCount());
         }
-        lastFundingIncomeQueryTime = System.currentTimeMillis();
+        lastFundingIncomeQueryTime = lastFundingIncomeQueryTimes.values().stream()
+                .mapToLong(Long::longValue)
+                .max()
+                .orElse(lastFundingIncomeQueryTime);
         // 结算后保存状态
-        persistence.saveState(positions, totalPnl, totalTrades);
+        persistence.saveState(positions, totalPnl, totalTrades,
+                lastFundingIncomeQueryTime, new HashMap<>(lastFundingIncomeQueryTimes));
     }
 
-    private BigDecimal getActualFundingIncome(Position position, BigDecimal currentRate) {
+    private FundingIncomeResult getActualFundingIncome(Position position, BigDecimal currentRate, long endTime) {
         if (Config.SIMULATION_MODE) {
-            return estimateFundingIncome(position, currentRate);
+            return new FundingIncomeResult(
+                    estimateFundingIncome(position, currentRate),
+                    getLastFundingIncomeQueryTime(position.getSymbol()));
         }
 
-        long now = System.currentTimeMillis();
-        long startTime = lastFundingIncomeQueryTime > 0
-                ? lastFundingIncomeQueryTime + 1
-                : now - 2 * 60 * 60 * 1000L;
+        long symbolLastQueryTime = getLastFundingIncomeQueryTime(position.getSymbol());
+        long startTime = symbolLastQueryTime > 0
+                ? symbolLastQueryTime + 1
+                : endTime - FUNDING_INCOME_LOOKBACK_MS;
 
         try {
             List<FundingIncomeRecord> records = exchangeClient.getFundingIncomeRecords(
-                    position.getSymbol(), startTime, now);
+                    position.getSymbol(), startTime, endTime);
             BigDecimal actualIncome = BigDecimal.ZERO;
+            long maxRecordTime = symbolLastQueryTime;
             for (FundingIncomeRecord record : records) {
                 actualIncome = actualIncome.add(record.getIncome());
+                if (record.getTimeMillis() > maxRecordTime) {
+                    maxRecordTime = record.getTimeMillis();
+                }
             }
-            return actualIncome.setScale(6, RoundingMode.HALF_UP);
+            return new FundingIncomeResult(actualIncome.setScale(6, RoundingMode.HALF_UP), maxRecordTime);
         } catch (Exception e) {
             log.error("❌ 查询 {} 真实资金费账单失败，本轮不做本地估算记账: {}",
                     position.getSymbol(), e.getMessage());
-            return BigDecimal.ZERO;
+            return new FundingIncomeResult(BigDecimal.ZERO, symbolLastQueryTime);
         }
+    }
+
+    private long getLastFundingIncomeQueryTime(String symbol) {
+        return lastFundingIncomeQueryTimes.getOrDefault(symbol, lastFundingIncomeQueryTime);
     }
 
     private BigDecimal estimateFundingIncome(Position position, BigDecimal currentRate) {
@@ -372,6 +398,62 @@ public class FundingArbitrageBot {
         return notionalValue
                 .multiply(currentRate.abs())
                 .setScale(6, RoundingMode.HALF_UP);
+    }
+
+    private void restorePositions(StrategyPersistence.StrategyState savedState) {
+        if (savedState.positions == null || savedState.positions.isEmpty()) {
+            return;
+        }
+
+        int restored = 0;
+        for (StrategyPersistence.PositionState ps : savedState.positions) {
+            Position position = positions.get(ps.symbol);
+            if (position == null) {
+                log.warn("⚠️  持久化中存在未配置币种 {}，跳过恢复", ps.symbol);
+                continue;
+            }
+
+            try {
+                LocalDateTime entryTime = ps.entryTime == null || ps.entryTime.isEmpty()
+                        ? LocalDateTime.now()
+                        : LocalDateTime.parse(ps.entryTime, dtf);
+                position.restore(
+                        BigDecimal.valueOf(ps.positionSize),
+                        BigDecimal.valueOf(ps.entryPrice),
+                        BigDecimal.valueOf(ps.lastFundingRate),
+                        ps.positionSide,
+                        entryTime,
+                        ps.fundingCount,
+                        BigDecimal.valueOf(ps.totalFundingEarned)
+                );
+                restored++;
+            } catch (Exception e) {
+                log.error("恢复 {} 持仓状态失败: {}", ps.symbol, e.getMessage());
+            }
+        }
+        log.info("✅ 已恢复 {} 个本地持仓状态", restored);
+    }
+
+    private void restoreFundingIncomeQueryTimes(StrategyPersistence.StrategyState savedState) {
+        if (savedState.lastFundingIncomeQueryTimes != null && !savedState.lastFundingIncomeQueryTimes.isEmpty()) {
+            lastFundingIncomeQueryTimes.putAll(savedState.lastFundingIncomeQueryTimes);
+            return;
+        }
+        if (savedState.lastFundingIncomeQueryTime > 0 && savedState.positions != null) {
+            for (StrategyPersistence.PositionState ps : savedState.positions) {
+                lastFundingIncomeQueryTimes.put(ps.symbol, savedState.lastFundingIncomeQueryTime);
+            }
+        }
+    }
+
+    private static class FundingIncomeResult {
+        final BigDecimal income;
+        final long maxRecordTime;
+
+        FundingIncomeResult(BigDecimal income, long maxRecordTime) {
+            this.income = income;
+            this.maxRecordTime = maxRecordTime;
+        }
     }
 
     /**
@@ -488,18 +570,32 @@ public class FundingArbitrageBot {
      */
     private boolean isExposureAcceptable(String newSide) {
         BigDecimal currentExposure = calculateNetExposure();
+        BigDecimal totalNotional = BigDecimal.ZERO;
+        BigDecimal netNotional = BigDecimal.ZERO;
 
-        // 假设新仓位大小（简化计算，不精确但保守
-        BigDecimal singlePositionRatio = BigDecimal.ONE.divide(
-                new BigDecimal(strategyControl.getMaxPositions()), 4, RoundingMode.HALF_UP
-        );
-
-        BigDecimal newExposure;
-        if ("LONG".equals(newSide)) {
-            newExposure = currentExposure.add(singlePositionRatio);
-        } else {
-            newExposure = currentExposure.subtract(singlePositionRatio);
+        for (Position pos : positions.values()) {
+            if (!pos.hasPosition()) continue;
+            BigDecimal notional = pos.getPositionSize().multiply(pos.getEntryPrice());
+            totalNotional = totalNotional.add(notional);
+            if ("LONG".equals(pos.getPositionSide())) {
+                netNotional = netNotional.add(notional);
+            } else {
+                netNotional = netNotional.subtract(notional);
+            }
         }
+
+        BigDecimal newPositionNotional = Config.POSITION_VALUE_USDT.multiply(BigDecimal.valueOf(Config.LEVERAGE));
+        totalNotional = totalNotional.add(newPositionNotional);
+
+        if ("LONG".equals(newSide)) {
+            netNotional = netNotional.add(newPositionNotional);
+        } else {
+            netNotional = netNotional.subtract(newPositionNotional);
+        }
+
+        BigDecimal newExposure = totalNotional.compareTo(BigDecimal.ZERO) == 0
+                ? BigDecimal.ZERO
+                : netNotional.divide(totalNotional, 4, RoundingMode.HALF_UP);
 
         boolean acceptable = newExposure.abs().compareTo(MAX_NET_EXPOSURE) <= 0;
 
@@ -542,6 +638,7 @@ public class FundingArbitrageBot {
      * 记录一次平仓盈亏，更新熔断状态和总收益
      */
     private void recordClosePnl(BigDecimal pnl) {
+        resetDailyPnlIfNeeded();
         dailyPnl = dailyPnl.add(pnl);
         totalPnl = totalPnl.add(pnl);  // ✅ 修复：平仓盈亏也要计入总收益
         if (pnl.compareTo(BigDecimal.ZERO) < 0) {
@@ -591,6 +688,7 @@ public class FundingArbitrageBot {
     // Bug-4修复: updateBalance 补全风控逻辑
     private void updateBalance() {
         try {
+            resetDailyPnlIfNeeded();
             BigDecimal balance = exchangeClient.getBalance();
             if (initialBalance == null) {
                 initialBalance = balance;
@@ -624,14 +722,24 @@ public class FundingArbitrageBot {
             }
 
             // 单日亏损检查
-            if (totalPnl.compareTo(Config.MAX_DAILY_LOSS.negate()) < 0) {
+            if (dailyPnl.compareTo(Config.MAX_DAILY_LOSS.negate()) < 0) {
                 log.error("🚨 风控触发！单日亏损 {} USDT 超过阈值 {} USDT，停止交易！",
-                        totalPnl.setScale(2, RoundingMode.HALF_UP), Config.MAX_DAILY_LOSS);
+                        dailyPnl.setScale(2, RoundingMode.HALF_UP), Config.MAX_DAILY_LOSS);
                 emergencyCloseAll();
             }
 
         } catch (IOException e) {
             log.error("❌ 获取余额失败（风控无法执行）: {}", e.getMessage());
+        }
+    }
+
+    private void resetDailyPnlIfNeeded() {
+        LocalDateTime now = LocalDateTime.now();
+        if (dailyPnlDate == null || dailyPnlDate.toLocalDate().isBefore(now.toLocalDate())) {
+            dailyPnl = BigDecimal.ZERO;
+            consecutiveLosses = 0;
+            dailyPnlDate = now;
+            log.info("📅 新交易日开始，已重置单日盈亏与连续亏损计数");
         }
     }
 

@@ -66,11 +66,31 @@ public class StrategyPersistence {
      * 保存策略状态
      */
     public void saveState(Map<String, Position> positions, BigDecimal totalPnl, int totalTrades) {
+        saveState(positions, totalPnl, totalTrades, 0L);
+    }
+
+    /**
+     * 保存策略状态
+     */
+    public void saveState(Map<String, Position> positions, BigDecimal totalPnl, int totalTrades,
+                          long lastFundingIncomeQueryTime) {
+        saveState(positions, totalPnl, totalTrades, lastFundingIncomeQueryTime, new HashMap<>());
+    }
+
+    /**
+     * 保存策略状态
+     */
+    public void saveState(Map<String, Position> positions, BigDecimal totalPnl, int totalTrades,
+                          long lastFundingIncomeQueryTime, Map<String, Long> lastFundingIncomeQueryTimes) {
         try {
             StrategyState state = new StrategyState();
             state.saveTime = LocalDateTime.now().format(dtf);
             state.totalPnl = totalPnl.doubleValue();
             state.totalTrades = totalTrades;
+            state.lastFundingIncomeQueryTime = lastFundingIncomeQueryTime;
+            state.lastFundingIncomeQueryTimes = lastFundingIncomeQueryTimes == null
+                    ? new HashMap<>()
+                    : new HashMap<>(lastFundingIncomeQueryTimes);
 
             for (Position pos : positions.values()) {
                 if (pos.hasPosition()) {
@@ -187,6 +207,8 @@ public class StrategyPersistence {
         public String saveTime;
         public double totalPnl;
         public int totalTrades;
+        public long lastFundingIncomeQueryTime;
+        public Map<String, Long> lastFundingIncomeQueryTimes = new HashMap<>();
         public List<PositionState> positions = new ArrayList<>();
     }
 

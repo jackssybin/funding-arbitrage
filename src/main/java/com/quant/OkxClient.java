@@ -156,7 +156,13 @@ public class OkxClient implements ExchangeClient {
         try (Response response = httpClient.newCall(request).execute()) {
             String body = checkResponse(response, "获取24h涨跌幅");
             JsonNode json = mapper.readTree(body);
-            return new BigDecimal(json.get("data").get(0).get("sodUtc8").asText());
+            JsonNode ticker = json.get("data").get(0);
+            BigDecimal last = new BigDecimal(ticker.get("last").asText());
+            BigDecimal open24h = new BigDecimal(ticker.get("open24h").asText());
+            if (open24h.compareTo(BigDecimal.ZERO) == 0) {
+                return BigDecimal.ZERO;
+            }
+            return last.subtract(open24h).divide(open24h, 8, RoundingMode.HALF_UP);
         }
     }
 

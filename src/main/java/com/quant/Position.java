@@ -55,6 +55,22 @@ public class Position {
     }
 
     /**
+     * 从持久化状态恢复持仓，保留原始开仓时间和资金费安全垫。
+     */
+    public void restore(BigDecimal size, BigDecimal price, BigDecimal fundingRate, String side,
+                        LocalDateTime entryTime, int fundingCount, BigDecimal totalFundingEarned) {
+        this.hasPosition = true;
+        this.positionSize = size;
+        this.entryPrice = price;
+        this.lastFundingRate = fundingRate;
+        this.positionSide = side;
+        this.entryTime = entryTime;
+        this.fundingCount = fundingCount;
+        this.totalFundingEarned = totalFundingEarned == null ? BigDecimal.ZERO : totalFundingEarned;
+        this.gridOrders.clear();
+    }
+
+    /**
      * 记录一次资金费结算
      */
     public void recordFundingSettlement(BigDecimal earning) {
