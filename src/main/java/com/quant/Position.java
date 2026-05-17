@@ -212,6 +212,20 @@ public class Position {
     }
 
     /**
+     * 设置累计资金费收益（用于状态恢复）
+     */
+    public void setTotalFundingEarned(BigDecimal amount) {
+        this.totalFundingEarned = amount;
+    }
+
+    /**
+     * 设置资金费结算次数（用于状态恢复）
+     */
+    public void setFundingCount(int count) {
+        this.fundingCount = count;
+    }
+
+    /**
      * 更新浮盈浮亏
      */
     public void updateUnrealizedPnl(BigDecimal currentPrice) {
