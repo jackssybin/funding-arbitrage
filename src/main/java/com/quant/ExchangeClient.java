@@ -19,8 +19,16 @@ public interface ExchangeClient {
     /** 获取单个币种的当前资金费率 */
     BigDecimal getFundingRate(String symbol) throws IOException;
 
+    default BigDecimal getPredictedFundingRate(String symbol) throws IOException {
+        return getFundingRate(symbol);
+    }
+
     /** 获取当前最新价格 */
     BigDecimal getCurrentPrice(String symbol) throws IOException;
+
+    default BigDecimal getMidPrice(String symbol) throws IOException {
+        return getCurrentPrice(symbol);
+    }
 
     /** 获取24小时涨跌幅 */
     BigDecimal get24hChange(String symbol) throws IOException;

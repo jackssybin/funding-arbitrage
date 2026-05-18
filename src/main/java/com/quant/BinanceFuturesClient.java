@@ -284,6 +284,11 @@ public class BinanceFuturesClient implements ExchangeClient {
     }
 
     @Override
+    public BigDecimal getPredictedFundingRate(String symbol) throws IOException {
+        return getNextFundingRate(symbol);
+    }
+
+    @Override
     public List<FundingIncomeRecord> getFundingIncomeRecords(String symbol, long startTimeMillis, long endTimeMillis)
             throws IOException {
         List<FundingIncomeRecord> records = new ArrayList<>();

@@ -38,30 +38,7 @@ public class FundingArbitrageBot {
 
     private static final Logger log = LoggerFactory.getLogger(FundingArbitrageBot.class);
     private static final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-    private static final long FUNDING_INCOME_LOOKBACK_MS = 12 * 60 * 60 * 1000L;
 
-    // ========== 费率阈值（优化后）==========
-    // 提高到 0.1%，只做高收益机会
-    private static final BigDecimal MIN_FUNDING_RATE_POSITIVE = new BigDecimal("0.0010"); // 正费率0.1%
-    private static final BigDecimal MIN_FUNDING_RATE_NEGATIVE = new BigDecimal("0.0015"); // 负费率0.15%
-    
-    // ========== 费率趋势预测（防止开在下降通道
-    private static final int RATE_TREND_CHECK_MINUTES = 60; // 检查过去1小时费率趋势
-    private static final BigDecimal RATE_DECREASING_THRESHOLD = new BigDecimal("0.7"); // 费率下降超过30%不开仓
-    private static final BigDecimal CLOSE_FUNDING_RATE = new BigDecimal("0.0005"); // 0.05% 平仓阈值
-    private static final BigDecimal SWITCH_THRESHOLD   = new BigDecimal("0.0015");  // 0.15% 移仓阈值
-    private static final BigDecimal FEE_PER_TRADE      = new BigDecimal("0.003");  // 0.30% 手续费
-    
-    // ========== 风控参数（优化：降低杠杆，放宽止损）==========
-    private static final BigDecimal STOP_LOSS_RATIO    = new BigDecimal("0.05");  // 5% 止损（给价格波动留出空间）
-    private static final BigDecimal TAKE_PROFIT_RATIO  = new BigDecimal("0.08");  // 8% 止盈
-    
-    // ========== 负费率风险控制 ==========
-    private static final BigDecimal MAX_NEGATIVE_RATE  = new BigDecimal("-0.003"); // 低于-0.3%不做多（极端行情）
-    private static final BigDecimal MAX_24H_CHANGE     = new BigDecimal("0.1");    // 24h涨跌幅超过10%不交易
-
-    // ========== 结算时间（UTC 0, 8, 16 点） ==========
-    private static final List<Integer> FUNDING_HOURS = Arrays.asList(0, 8, 16);
     private volatile int lastSettledHourUtc = -1;
     private volatile long lastFundingIncomeQueryTime = 0L;
     private final Map<String, Long> lastFundingIncomeQueryTimes = new HashMap<>();
@@ -72,6 +49,8 @@ public class FundingArbitrageBot {
     private AtomicTransactionManager txManager;
     private SmartOrderExecutor smartOrderExecutor;
     private MarginGuardian marginGuardian;
+    private MarketDataService marketDataService;
+    private RiskManager riskManager;
     private StrategyControl strategyControl;      // 策略控制器
     private StrategyPersistence persistence;       // 持久化
     private StrategyDashboard dashboard;           // Web仪表盘
@@ -82,23 +61,13 @@ public class FundingArbitrageBot {
     // ========== 状态变量 ==========
     private final Map<String, Position> positions = new HashMap<>();
     private final Map<String, BigDecimal> fundingRates = new HashMap<>();
-    private final Map<String, BigDecimal> price24hChange = new HashMap<>(); // 24h涨跌幅
-    private final Map<String, List<BigDecimal>> rateHistory = new HashMap<>(); // 费率历史用于趋势判断
     
     // ========== 风控熔断机制 ==========
     private volatile int consecutiveLosses = 0;  // 连续亏损次数
     private volatile BigDecimal dailyPnl = BigDecimal.ZERO;  // 当日盈亏
     private volatile LocalDateTime dailyPnlDate = LocalDateTime.now();
-    private static final int MAX_CONSECUTIVE_LOSSES = 3;  // 最多连续亏损3次
-    private static final BigDecimal MAX_DAILY_LOSS_AMOUNT = new BigDecimal("500");  // 单日最大亏损500USDT
-    private static final BigDecimal MAX_NET_EXPOSURE = new BigDecimal("0.5");  // 最大净敞口50%
-
-    // 费率有效性范围
-    private static final BigDecimal MIN_VALID_RATE = new BigDecimal("-0.01");
-    private static final BigDecimal MAX_VALID_RATE = new BigDecimal("0.01");
     private volatile BigDecimal totalPnl = BigDecimal.ZERO;
     private volatile int totalTrades = 0;
-    private volatile LocalDateTime lastRateUpdate = null;
     private volatile BigDecimal initialBalance = null;
     private volatile BigDecimal maxBalance     = BigDecimal.ZERO;
     private volatile boolean dashboardEnabled = true; // 是否启用Web仪表盘
@@ -178,6 +147,8 @@ public class FundingArbitrageBot {
             // 6. 事务与订单执行器
             smartOrderExecutor = new SmartOrderExecutor(exchangeClient, precision, retryManager);
             txManager = new AtomicTransactionManager(exchangeClient, smartOrderExecutor);
+            marketDataService = new MarketDataService(exchangeClient);
+            riskManager = new RiskManager();
             log.info("✅ 事务管理器初始化");
 
             // 7. OKX 也支持保证金守护了
@@ -247,11 +218,11 @@ public class FundingArbitrageBot {
         log.info("│ 最大持仓数:     {} 个币种", Config.MAX_POSITIONS);
         log.info("│ 杠杆倍数:       {}x", Config.LEVERAGE);
         log.info("│ 单仓位价值:     {} USDT", Config.POSITION_VALUE_USDT);
-        log.info("│ 正费率开仓:     {}%", MIN_FUNDING_RATE_POSITIVE.multiply(new BigDecimal("100")).setScale(3, RoundingMode.HALF_UP));
-        log.info("│ 负费率开仓:     {}%", MIN_FUNDING_RATE_NEGATIVE.multiply(new BigDecimal("100")).setScale(3, RoundingMode.HALF_UP));
-        log.info("│ 平仓阈值:       {}%", CLOSE_FUNDING_RATE.multiply(new BigDecimal("100")).setScale(3, RoundingMode.HALF_UP));
-        log.info("│ 止损比例:       {}%", STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
-        log.info("│ 止盈比例:       {}%", TAKE_PROFIT_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
+        log.info("│ 正费率开仓:     {}%", Config.MIN_FUNDING_RATE_POSITIVE.multiply(new BigDecimal("100")).setScale(3, RoundingMode.HALF_UP));
+        log.info("│ 负费率开仓:     {}%", Config.MIN_FUNDING_RATE_NEGATIVE.multiply(new BigDecimal("100")).setScale(3, RoundingMode.HALF_UP));
+        log.info("│ 平仓阈值:       {}%", Config.CLOSE_FUNDING_RATE.multiply(new BigDecimal("100")).setScale(3, RoundingMode.HALF_UP));
+        log.info("│ 止损比例:       {}%", Config.STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
+        log.info("│ 止盈比例:       {}%", Config.TAKE_PROFIT_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
         log.info("│ 网格交易:       {}", Config.GRID_ENABLED ? "启用 ✓" : "禁用");
         log.info("│ 模拟模式:       {}", Config.SIMULATION_MODE ? "开启 ✅" : "关闭 ❌");
         if (dashboardEnabled) {
@@ -303,7 +274,7 @@ public class FundingArbitrageBot {
         int utcMinute = utcNow.getMinute();
 
         // Bug-1修复: 只在结算窗口的前 15 分钟内执行，且每个窗口只结算一次
-        if (FUNDING_HOURS.contains(utcHour) && utcMinute < 15) {
+        if (Config.FUNDING_HOURS_UTC.contains(utcHour) && utcMinute < 15) {
             if (lastSettledHourUtc != utcHour) {
                 log.info("💰 检测到资金费结算窗口 UTC {}:00，开始结算...", utcHour);
                 settleFundingFee();
@@ -378,7 +349,7 @@ public class FundingArbitrageBot {
         long symbolLastQueryTime = getLastFundingIncomeQueryTime(position.getSymbol());
         long startTime = symbolLastQueryTime > 0
                 ? symbolLastQueryTime + 1
-                : endTime - FUNDING_INCOME_LOOKBACK_MS;
+                : endTime - Config.FUNDING_INCOME_LOOKBACK_MS;
 
         try {
             List<FundingIncomeRecord> records = exchangeClient.getFundingIncomeRecords(
@@ -470,168 +441,45 @@ public class FundingArbitrageBot {
      * 更新24h涨跌幅 - 用于负费率风险过滤
      */
     private void update24hPrices() {
-        try {
-            for (String symbol : Config.TRADING_SYMBOLS) {
-                BigDecimal change = exchangeClient.get24hChange(symbol);
-                price24hChange.put(symbol, change);
-            }
-            log.debug("✅ 已更新24h涨跌幅");
-        } catch (Exception e) {
-            log.warn("更新24h涨跌幅失败: {}", e.getMessage());
-        }
+        marketDataService.update24hChanges(Config.TRADING_SYMBOLS);
     }
 
-    /**
-     * 检查极端行情风险（负费率专用）
-     * 费率太负说明市场极度看空，此时做多风险极大
-     */
     private boolean isExtremeMarket(String symbol, BigDecimal rate) {
-        // 1. 费率低于 -0.3%，可能是极端行情
-        if (rate.compareTo(MAX_NEGATIVE_RATE) < 0) {
-            log.warn("⚠️  {} 费率 {}% 异常低，可能是极端行情，跳过做多", 
-                    symbol, rate.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
-            return true;
+        if (marketDataService == null) {
+            marketDataService = new MarketDataService(exchangeClient);
         }
-
-        // 2. 24h涨跌幅超过 ±10%
-        BigDecimal change = price24hChange.getOrDefault(symbol, BigDecimal.ZERO);
-        if (change.abs().compareTo(MAX_24H_CHANGE) > 0) {
-            log.warn("⚠️  {} 24h涨跌幅 {}% 过大，跳过交易", 
-                    symbol, change.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
-            return true;
-        }
-
-        return false;
+        return marketDataService.isExtremeMarket(symbol, rate);
     }
 
-    /**
-     * 检查费率趋势 - 防止开在费率下降通道
-     * 返回 true 表示趋势良好（正费率上升/负费率更负），可以开仓
-     */
     private boolean isRateTrendGood(String symbol, BigDecimal currentRate) {
-        List<BigDecimal> history = rateHistory.get(symbol);
-        if (history == null || history.size() < 5) {
-            // 历史数据不足，保守判断为趋势良好
-            return true;
+        if (marketDataService == null) {
+            marketDataService = new MarketDataService(exchangeClient);
         }
-
-        // 取最近5次数据的平均值
-        BigDecimal avgRate = BigDecimal.ZERO;
-        for (BigDecimal r : history) {
-            avgRate = avgRate.add(r);
-        }
-        avgRate = avgRate.divide(new BigDecimal(history.size()), 8, RoundingMode.HALF_UP);
-
-        // 趋势判断
-        if (currentRate.compareTo(BigDecimal.ZERO) > 0) {
-            // 正费率：当前费率应 > 历史平均的70%（即下降不超过30%）
-            BigDecimal threshold = avgRate.multiply(RATE_DECREASING_THRESHOLD);
-            boolean trendGood = currentRate.compareTo(threshold) >= 0;
-            if (!trendGood) {
-                log.warn("⚠️  {} 费率处于下降通道: 当前{}% vs 平均{}%，跳过开仓", symbol,
-                        currentRate.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
-                        avgRate.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
-            }
-            return trendGood;
-        } else {
-            // 负费率：绝对值应 > 历史平均的70%
-            BigDecimal threshold = avgRate.abs().multiply(RATE_DECREASING_THRESHOLD);
-            boolean trendGood = currentRate.abs().compareTo(threshold) >= 0;
-            if (!trendGood) {
-                log.warn("⚠️  {} 负费率处于衰减通道: 当前{}% vs 平均{}%，跳过开仓", symbol,
-                        currentRate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
-                        avgRate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
-            }
-            return trendGood;
-        }
+        return marketDataService.isRateTrendGood(symbol, currentRate);
     }
 
-    /**
-     * 计算净敞口 - 多空净方向暴露
-     * 返回正值表示净多头比例，负值表示净空头比例（0-1之间）
-     */
     private BigDecimal calculateNetExposure() {
-        BigDecimal totalNotional = BigDecimal.ZERO;
-        BigDecimal netNotional = BigDecimal.ZERO;
-
-        for (Position pos : positions.values()) {
-            if (!pos.hasPosition()) continue;
-
-            BigDecimal notional = pos.getPositionSize().multiply(pos.getEntryPrice());
-            totalNotional = totalNotional.add(notional);
-
-            if ("LONG".equals(pos.getPositionSide())) {
-                netNotional = netNotional.add(notional);
-            } else {
-                netNotional = netNotional.subtract(notional);
-            }
+        if (riskManager == null) {
+            riskManager = new RiskManager();
         }
-
-        if (totalNotional.compareTo(BigDecimal.ZERO) == 0) {
-            return BigDecimal.ZERO;
-        }
-
-        return netNotional.divide(totalNotional, 4, RoundingMode.HALF_UP);
+        return riskManager.calculateNetExposure(positions);
     }
 
-    /**
-     * 检查净敞口是否超限
-     * 开仓前调用，确保不会出现单边全空/全多
-     */
     private boolean isExposureAcceptable(String newSide) {
-        BigDecimal currentExposure = calculateNetExposure();
-        BigDecimal totalNotional = BigDecimal.ZERO;
-        BigDecimal netNotional = BigDecimal.ZERO;
-
-        for (Position pos : positions.values()) {
-            if (!pos.hasPosition()) continue;
-            BigDecimal notional = pos.getPositionSize().multiply(pos.getEntryPrice());
-            totalNotional = totalNotional.add(notional);
-            if ("LONG".equals(pos.getPositionSide())) {
-                netNotional = netNotional.add(notional);
-            } else {
-                netNotional = netNotional.subtract(notional);
-            }
+        if (riskManager == null) {
+            riskManager = new RiskManager();
         }
-
-        BigDecimal newPositionNotional = Config.POSITION_VALUE_USDT.multiply(BigDecimal.valueOf(Config.LEVERAGE));
-        totalNotional = totalNotional.add(newPositionNotional);
-
-        if ("LONG".equals(newSide)) {
-            netNotional = netNotional.add(newPositionNotional);
-        } else {
-            netNotional = netNotional.subtract(newPositionNotional);
-        }
-
-        BigDecimal newExposure = totalNotional.compareTo(BigDecimal.ZERO) == 0
-                ? BigDecimal.ZERO
-                : netNotional.divide(totalNotional, 4, RoundingMode.HALF_UP);
-
-        boolean acceptable = newExposure.abs().compareTo(MAX_NET_EXPOSURE) <= 0;
-
-        if (!acceptable) {
-            log.warn("⚠️  净敞口超限: 当前{}%，开{}后将达{}%，限制{}%，跳过开仓",
-                    currentExposure.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
-                    newSide,
-                    newExposure.abs().multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
-                    MAX_NET_EXPOSURE.multiply(new BigDecimal("100")).setScale(0, RoundingMode.HALF_UP));
-        }
-
-        return acceptable;
+        return riskManager.isExposureAcceptable(positions, newSide);
     }
-
-    /**
-     * 策略熔断检查 - 连续亏损/单日大亏后暂停
-     */
     private boolean isTradingAllowed() {
         // 1. 连续亏损熔断
-        if (consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) {
+        if (consecutiveLosses >= Config.MAX_CONSECUTIVE_LOSSES) {
             log.warn("🚨 连续亏损{}次触发熔断，暂停开仓", consecutiveLosses);
             return false;
         }
 
         // 2. 单日亏损熔断
-        if (dailyPnl.compareTo(MAX_DAILY_LOSS_AMOUNT.negate()) < 0) {
+        if (dailyPnl.compareTo(Config.MAX_DAILY_LOSS_AMOUNT.negate()) < 0) {
             log.warn("🚨 单日亏损{}USDT触发熔断，暂停开仓", dailyPnl.setScale(2, RoundingMode.HALF_UP));
             return false;
         }
@@ -660,36 +508,23 @@ public class FundingArbitrageBot {
 
     private void updateFundingRates() {
         try {
-            Map<String, BigDecimal> rates = exchangeClient.getAllFundingRates(Config.TRADING_SYMBOLS);
-            this.fundingRates.putAll(rates);
-            this.lastRateUpdate = LocalDateTime.now();
-
-            // 记录费率历史用于趋势判断
-            for (Map.Entry<String, BigDecimal> entry : rates.entrySet()) {
-                String symbol = entry.getKey();
-                BigDecimal rate = entry.getValue();
-                rateHistory.computeIfAbsent(symbol, k -> new LinkedList<>());
-                List<BigDecimal> history = rateHistory.get(symbol);
-                history.add(rate);
-                // 只保留最近20条数据
-                while (history.size() > 20) {
-                    ((LinkedList<BigDecimal>) history).removeFirst();
-                }
-            }
-
-            log.info("✅ 已更新 {} 个币种的资金费率", rates.size());
+            marketDataService.updateFundingRates(Config.TRADING_SYMBOLS);
+            fundingRates.clear();
+            fundingRates.putAll(marketDataService.getFundingRates());
         } catch (IOException e) {
             log.error("更新资金费率失败: {}", e.getMessage());
         }
     }
 
     private void updateFundingRatesIfNeeded() {
-        if (lastRateUpdate == null ||
-                lastRateUpdate.plusSeconds(Config.RATE_UPDATE_INTERVAL_MS / 1000).isBefore(LocalDateTime.now())) {
-            updateFundingRates();
+        try {
+            marketDataService.updateFundingRatesIfNeeded(Config.TRADING_SYMBOLS);
+            fundingRates.clear();
+            fundingRates.putAll(marketDataService.getFundingRates());
+        } catch (IOException e) {
+            log.error("更新资金费率失败: {}", e.getMessage());
         }
     }
-
     private void checkRiskControl() {
         updateBalance();
         marginGuardian.checkAndTopupIfNeeded();
@@ -876,14 +711,14 @@ public class FundingArbitrageBot {
                                   nearFunding ? " ⏰ 2小时内结算" : "";
             
             // ========== 优化2: 动态止损 - 显示安全垫状态 ==========
-            BigDecimal dynamicStopLoss = position.getDynamicStopLossRatio(STOP_LOSS_RATIO);
+            BigDecimal dynamicStopLoss = position.getDynamicStopLossRatio(Config.STOP_LOSS_RATIO);
             boolean principalSafe = position.isPrincipalSafe();
             BigDecimal safetyBuffer = position.getSafetyBuffer();
             
             // 检查费率是否低于平仓阈值（临近结算时提高平仓门槛）
             BigDecimal effectiveCloseRate = nearFunding ? 
-                    CLOSE_FUNDING_RATE.multiply(new BigDecimal("0.5")) : // 临近结算时，费率要低一半才平仓
-                    CLOSE_FUNDING_RATE;
+                    Config.CLOSE_FUNDING_RATE.multiply(Config.NEAR_FUNDING_CLOSE_RATE_MULTIPLIER) : // 临近结算时，费率要低一半才平仓
+                    Config.CLOSE_FUNDING_RATE;
             
             if (currentRate.abs().compareTo(effectiveCloseRate) < 0) {
                 // 临近结算时，除非费率特别低，否则等拿到资金费再平仓
@@ -902,17 +737,17 @@ public class FundingArbitrageBot {
             }
 
             // P2 修复：止损检查 - 动态止损（已赚资金费作为安全垫）
-            if (position.isStopLossTriggered(STOP_LOSS_RATIO)) {
+            if (position.isStopLossTriggered(Config.STOP_LOSS_RATIO)) {
                 if (principalSafe) {
                     log.info("🛡️  {} 触发原始止损{}%，但资金费安全垫已覆盖浮亏（缓冲{} USDT），继续持有{}",
                             symbol,
-                            STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
+                            Config.STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
                             safetyBuffer.setScale(4, RoundingMode.HALF_UP),
                             fundingHint);
                 } else {
                     log.error("🚨 {} 触发动态止损！原始{}% → 动态{}%，盈亏{}%，强制平仓{}",
                             symbol,
-                            STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
+                            Config.STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
                             dynamicStopLoss.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
                             position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
                             fundingHint);
@@ -924,8 +759,8 @@ public class FundingArbitrageBot {
 
             // P2 修复：止盈检查 - 大行情主动止盈离场（临近结算时更宽松）
             BigDecimal effectiveTakeProfit = nearFunding ?
-                    TAKE_PROFIT_RATIO.multiply(new BigDecimal("1.5")) : // 临近结算时止盈线提高50%
-                    TAKE_PROFIT_RATIO;
+                    Config.TAKE_PROFIT_RATIO.multiply(Config.NEAR_FUNDING_TAKE_PROFIT_MULTIPLIER) : // 临近结算时止盈线提高50%
+                    Config.TAKE_PROFIT_RATIO;
             
             if (position.isTakeProfitTriggered(effectiveTakeProfit)) {
                 log.info("🎯 {} 触发止盈！盈亏 {}%，主动平仓{}",
@@ -943,7 +778,7 @@ public class FundingArbitrageBot {
             Position position = positions.get(symbol);
 
             // P2 修复：跳过无效的异常费率数据
-            if (rate.compareTo(MIN_VALID_RATE) < 0 || rate.compareTo(MAX_VALID_RATE) > 0) {
+            if (rate.compareTo(Config.MIN_VALID_FUNDING_RATE) < 0 || rate.compareTo(Config.MAX_VALID_FUNDING_RATE) > 0) {
                 log.warn("⚠️ {} 费率 {}% 异常，跳过", symbol,
                         rate.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
                 continue;
@@ -951,8 +786,8 @@ public class FundingArbitrageBot {
 
             // 动态阈值：正费率0.06%，负费率0.08%（负费率风险更高）
             BigDecimal minRate = rate.compareTo(BigDecimal.ZERO) >= 0 
-                    ? MIN_FUNDING_RATE_POSITIVE 
-                    : MIN_FUNDING_RATE_NEGATIVE;
+                    ? Config.MIN_FUNDING_RATE_POSITIVE
+                    : Config.MIN_FUNDING_RATE_NEGATIVE;
 
             if (rate.abs().compareTo(minRate) < 0) {
                 break;
@@ -995,7 +830,7 @@ public class FundingArbitrageBot {
                     
                     // ========== 优化3: 移仓成本测算 ==========
                     Position.SwitchCostAnalysis costAnalysis = 
-                            toClose.analyzeSwitchCost(rate.abs(), SWITCH_THRESHOLD, FEE_PER_TRADE);
+                            toClose.analyzeSwitchCost(rate.abs(), Config.SWITCH_FUNDING_RATE_THRESHOLD, Config.FEE_PER_TRADE);
                     
                     // 临近结算时不轻易移仓
                     boolean veryNearFunding = toClose.isVeryNearFundingTime();

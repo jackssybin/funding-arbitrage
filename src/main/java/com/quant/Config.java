@@ -3,6 +3,7 @@ package com.quant;
 import io.github.cdimascio.dotenv.Dotenv;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -57,16 +58,56 @@ public class Config {
     public static final BigDecimal FUNDING_RATE_THRESHOLD = new BigDecimal(
             getEnv("FUNDING_RATE_THRESHOLD", "0.0005")
     );
+
+    public static final BigDecimal MIN_FUNDING_RATE_POSITIVE = new BigDecimal(
+            getEnv("MIN_FUNDING_RATE_POSITIVE", "0.0010")
+    );
+
+    public static final BigDecimal MIN_FUNDING_RATE_NEGATIVE = new BigDecimal(
+            getEnv("MIN_FUNDING_RATE_NEGATIVE", "0.0015")
+    );
     
     // 平仓阈值：低于这个值平仓 (默认 0.02%)
     public static final BigDecimal FUNDING_RATE_CLOSE_THRESHOLD = new BigDecimal(
             getEnv("FUNDING_RATE_CLOSE_THRESHOLD", "0.0002")
+    );
+
+    public static final BigDecimal CLOSE_FUNDING_RATE = new BigDecimal(
+            getEnv("CLOSE_FUNDING_RATE", "0.0005")
+    );
+
+    public static final BigDecimal NEAR_FUNDING_CLOSE_RATE_MULTIPLIER = new BigDecimal(
+            getEnv("NEAR_FUNDING_CLOSE_RATE_MULTIPLIER", "0.5")
     );
     
     // ========== 自动移仓配置 [功能3] ==========
     // 移仓阈值：新币种费率比当前持仓高多少时移仓 (0.03% = 0.0003)
     public static final BigDecimal SWITCH_THRESHOLD = new BigDecimal(
             getEnv("SWITCH_THRESHOLD", "0.0003")
+    );
+
+    public static final BigDecimal SWITCH_FUNDING_RATE_THRESHOLD = new BigDecimal(
+            getEnv("SWITCH_FUNDING_RATE_THRESHOLD", "0.0015")
+    );
+
+    public static final BigDecimal FEE_PER_TRADE = new BigDecimal(
+            getEnv("FEE_PER_TRADE", "0.003")
+    );
+
+    public static final int RATE_TREND_CHECK_MINUTES = Integer.parseInt(
+            getEnv("RATE_TREND_CHECK_MINUTES", "60")
+    );
+
+    public static final BigDecimal RATE_DECREASING_THRESHOLD = new BigDecimal(
+            getEnv("RATE_DECREASING_THRESHOLD", "0.7")
+    );
+
+    public static final int RATE_HISTORY_LIMIT = Integer.parseInt(
+            getEnv("RATE_HISTORY_LIMIT", "20")
+    );
+
+    public static final BigDecimal FUNDING_SPIKE_MULTIPLIER = new BigDecimal(
+            getEnv("FUNDING_SPIKE_MULTIPLIER", "3")
     );
 
     // ========== 网格交易配置 [功能4] ==========
@@ -95,6 +136,18 @@ public class Config {
     public static final BigDecimal MAX_DAILY_LOSS = new BigDecimal(
             getEnv("MAX_DAILY_LOSS", "100")
     );
+
+    public static final int MAX_CONSECUTIVE_LOSSES = Integer.parseInt(
+            getEnv("MAX_CONSECUTIVE_LOSSES", "3")
+    );
+
+    public static final BigDecimal MAX_DAILY_LOSS_AMOUNT = new BigDecimal(
+            getEnv("MAX_DAILY_LOSS_AMOUNT", "500")
+    );
+
+    public static final BigDecimal MAX_NET_EXPOSURE = new BigDecimal(
+            getEnv("MAX_NET_EXPOSURE", "0.5")
+    );
     
     // 最小账户余额 (USDT)
     public static final BigDecimal MIN_BALANCE = new BigDecimal(
@@ -104,6 +157,46 @@ public class Config {
     // 止损百分比
     public static final BigDecimal STOP_LOSS_PERCENT = new BigDecimal(
             getEnv("STOP_LOSS_PERCENT", "0.02")
+    );
+
+    public static final BigDecimal STOP_LOSS_RATIO = new BigDecimal(
+            getEnv("STOP_LOSS_RATIO", "0.05")
+    );
+
+    public static final BigDecimal TAKE_PROFIT_RATIO = new BigDecimal(
+            getEnv("TAKE_PROFIT_RATIO", "0.08")
+    );
+
+    public static final BigDecimal NEAR_FUNDING_TAKE_PROFIT_MULTIPLIER = new BigDecimal(
+            getEnv("NEAR_FUNDING_TAKE_PROFIT_MULTIPLIER", "1.5")
+    );
+
+    public static final BigDecimal MAX_NEGATIVE_RATE = new BigDecimal(
+            getEnv("MAX_NEGATIVE_RATE", "-0.003")
+    );
+
+    public static final BigDecimal MAX_24H_CHANGE = new BigDecimal(
+            getEnv("MAX_24H_CHANGE", "0.1")
+    );
+
+    public static final BigDecimal MIN_VALID_FUNDING_RATE = new BigDecimal(
+            getEnv("MIN_VALID_FUNDING_RATE", "-0.01")
+    );
+
+    public static final BigDecimal MAX_VALID_FUNDING_RATE = new BigDecimal(
+            getEnv("MAX_VALID_FUNDING_RATE", "0.01")
+    );
+
+    public static final BigDecimal BACKTEST_SLIPPAGE_RATE = new BigDecimal(
+            getEnv("BACKTEST_SLIPPAGE_RATE", "0.0002")
+    );
+
+    public static final List<Integer> FUNDING_HOURS_UTC = parseIntegerList(
+            getEnv("FUNDING_HOURS_UTC", "0,8,16")
+    );
+
+    public static final long FUNDING_INCOME_LOOKBACK_MS = Long.parseLong(
+            getEnv("FUNDING_INCOME_LOOKBACK_MS", String.valueOf(12L * 60 * 60 * 1000))
     );
     
     // 最大回撤百分比
@@ -146,6 +239,17 @@ public class Config {
             return value;
         }
         return dotenv.get(key, defaultValue);
+    }
+
+    private static List<Integer> parseIntegerList(String raw) {
+        List<Integer> result = new ArrayList<>();
+        for (String part : raw.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                result.add(Integer.parseInt(trimmed));
+            }
+        }
+        return result;
     }
 
     /**
