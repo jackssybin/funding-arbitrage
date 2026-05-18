@@ -347,7 +347,17 @@ public class FundingArbitrageBot {
                     position.getTotalFundingEarned().setScale(4, RoundingMode.HALF_UP),
                     position.getFundingCount());
             // 飞书推送：资金费结算通知
-            feishuNotifier.sendFundingSettlement(position.getSymbol(), earning, currentRate, position.getFundingCount());
+            try {
+                BigDecimal balance = exchangeClient.getBalance();
+                BigDecimal positionValue = position.getEntryPrice().multiply(position.getPositionSize());
+                BigDecimal expectedEarning = positionValue.multiply(currentRate.abs());
+                feishuNotifier.sendFundingSettlement(position.getSymbol(), earning, currentRate, position.getFundingCount(), balance, expectedEarning);
+            } catch (IOException e) {
+                log.warn("⚠️  获取余额失败，飞书通知将不带余额信息: {}", e.getMessage());
+                BigDecimal positionValue = position.getEntryPrice().multiply(position.getPositionSize());
+                BigDecimal expectedEarning = positionValue.multiply(currentRate.abs());
+                feishuNotifier.sendFundingSettlement(position.getSymbol(), earning, currentRate, position.getFundingCount(), BigDecimal.ZERO, expectedEarning);
+            }
         }
         lastFundingIncomeQueryTime = lastFundingIncomeQueryTimes.values().stream()
                 .mapToLong(Long::longValue)
@@ -1059,11 +1069,24 @@ public class FundingArbitrageBot {
                     .multiply(new BigDecimal("100"))
                     .setScale(2, RoundingMode.HALF_UP);
 
-            log.info("");
-            log.info("🎉 开仓完成！ {} {} ({}), 预计年化 {}%", symbol, sideName, alignedQuantity, annualized);
-            log.info("");
-            // 飞书推送：开仓通知
-            feishuNotifier.sendOpenPosition(symbol, sideName, alignedQuantity, fundingRate, annualized);
+            BigDecimal positionValue = currentPrice.multiply(alignedQuantity);
+            BigDecimal expectedEarningOpen = positionValue.multiply(fundingRate.abs());
+            
+            try {
+                BigDecimal openBalance = exchangeClient.getBalance();
+                log.info("");
+                log.info("🎉 开仓完成！ {} {} ({}), 预计年化 {}%", symbol, sideName, alignedQuantity, annualized);
+                log.info("");
+                // 飞书推送：开仓通知
+                feishuNotifier.sendOpenPosition(symbol, sideName, alignedQuantity, fundingRate, annualized, openBalance, expectedEarningOpen);
+            } catch (IOException e) {
+                log.warn("⚠️  获取余额失败，飞书通知将不带余额信息: {}", e.getMessage());
+                log.info("");
+                log.info("🎉 开仓完成！ {} {} ({}), 预计年化 {}%", symbol, sideName, alignedQuantity, annualized);
+                log.info("");
+                // 飞书推送：开仓通知
+                feishuNotifier.sendOpenPosition(symbol, sideName, alignedQuantity, fundingRate, annualized, BigDecimal.ZERO, expectedEarningOpen);
+            }
 
         } catch (Exception e) {
             log.error("❌ 开仓失败: {}", e.getMessage(), e);
@@ -1134,11 +1157,21 @@ public class FundingArbitrageBot {
             BigDecimal finalPnl = position.getUnrealizedPnl() != null ? position.getUnrealizedPnl() : BigDecimal.ZERO;
             dailyReporter.recordClose(symbol, position.getTotalFundingEarned(), finalPnl, reason);
 
-            log.info("");
-            log.info("✅ 平仓完成！");
-            log.info("");
-            // 飞书推送：平仓通知（带详细原因
-            feishuNotifier.sendClosePosition(symbol, position.getTotalFundingEarned(), finalPnl, reason);
+            try {
+                BigDecimal closeBalance = exchangeClient.getBalance();
+                log.info("");
+                log.info("✅ 平仓完成！");
+                log.info("");
+                // 飞书推送：平仓通知（带详细原因）
+                feishuNotifier.sendClosePosition(symbol, position.getTotalFundingEarned(), finalPnl, reason, closeBalance);
+            } catch (IOException e) {
+                log.warn("⚠️  获取余额失败，飞书通知将不带余额信息: {}", e.getMessage());
+                log.info("");
+                log.info("✅ 平仓完成！");
+                log.info("");
+                // 飞书推送：平仓通知（带详细原因）
+                feishuNotifier.sendClosePosition(symbol, position.getTotalFundingEarned(), finalPnl, reason, BigDecimal.ZERO);
+            }
 
         } catch (Exception e) {
             log.error("❌ 平仓失败: {}", e.getMessage(), e);

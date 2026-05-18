@@ -7,6 +7,8 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 
 /**
  * 飞书消息推送工具类
@@ -41,22 +43,29 @@ public class FeishuNotifier {
     /**
      * 发送开仓通知
      */
-    public void sendOpenPosition(String symbol, String side, BigDecimal quantity, BigDecimal rate, BigDecimal annualized) {
+    public void sendOpenPosition(String symbol, String side, BigDecimal quantity, BigDecimal rate, BigDecimal annualized, BigDecimal balance, BigDecimal expectedEarning) {
         if (!enabled) return;
         
+        String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
         String text = String.format(
             "🚀 【开仓通知】\n" +
             "━━━━━━━━━━━━━━━━\n" +
+            "发生时间: %s\n" +
             "币种: %s\n" +
             "方向: %s\n" +
             "数量: %s\n" +
             "费率: %s%%\n" +
+            "费率预期收益: %s USDT\n" +
             "预计年化: %s%%\n" +
+            "当前余额: %s USDT\n" +
             "━━━━━━━━━━━━━━━━",
+            time,
             symbol, side, 
             quantity.setScale(2, RoundingMode.HALF_UP),
             rate.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
-            annualized.setScale(2, RoundingMode.HALF_UP)
+            expectedEarning.setScale(4, RoundingMode.HALF_UP),
+            annualized.setScale(2, RoundingMode.HALF_UP),
+            balance.setScale(2, RoundingMode.HALF_UP)
         );
         sendText(text);
     }
@@ -64,21 +73,26 @@ public class FeishuNotifier {
     /**
      * 发送平仓通知
      */
-    public void sendClosePosition(String symbol, BigDecimal fundingEarning, BigDecimal tradingPnl, String reason) {
+    public void sendClosePosition(String symbol, BigDecimal fundingEarning, BigDecimal tradingPnl, String reason, BigDecimal balance) {
         if (!enabled) return;
         
+        String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
         String text = String.format(
             "📉 【平仓通知】\n" +
             "━━━━━━━━━━━━━━━━\n" +
+            "发生时间: %s\n" +
             "币种: %s\n" +
             "资金费收益: %s USDT\n" +
             "买卖盈亏: %s USDT\n" +
             "平仓原因: %s\n" +
+            "当前余额: %s USDT\n" +
             "━━━━━━━━━━━━━━━━",
+            time,
             symbol,
             fundingEarning.setScale(4, RoundingMode.HALF_UP),
             tradingPnl.setScale(4, RoundingMode.HALF_UP),
-            reason
+            reason,
+            balance.setScale(2, RoundingMode.HALF_UP)
         );
         sendText(text);
     }
@@ -86,21 +100,28 @@ public class FeishuNotifier {
     /**
      * 发送资金费结算通知
      */
-    public void sendFundingSettlement(String symbol, BigDecimal earning, BigDecimal rate, int count) {
+    public void sendFundingSettlement(String symbol, BigDecimal earning, BigDecimal rate, int count, BigDecimal balance, BigDecimal expectedEarning) {
         if (!enabled) return;
         
+        String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
         String text = String.format(
             "💰 【资金费结算】\n" +
             "━━━━━━━━━━━━━━━━\n" +
+            "发生时间: %s\n" +
             "币种: %s\n" +
             "本次收益: %s USDT\n" +
             "当前费率: %s%%\n" +
+            "费率预期收益: %s USDT\n" +
             "累计结算次数: 第%d次\n" +
+            "当前余额: %s USDT\n" +
             "━━━━━━━━━━━━━━━━",
+            time,
             symbol,
             earning.setScale(4, RoundingMode.HALF_UP),
             rate.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
-            count
+            expectedEarning.setScale(4, RoundingMode.HALF_UP),
+            count,
+            balance.setScale(2, RoundingMode.HALF_UP)
         );
         sendText(text);
     }
