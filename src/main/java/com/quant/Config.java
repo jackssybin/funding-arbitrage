@@ -5,7 +5,9 @@ import io.github.cdimascio.dotenv.Dotenv;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 配置类 - 支持 Binance / OKX 双交易所切换
@@ -36,6 +38,26 @@ public class Config {
     // 监控的交易对列表
     public static final List<String> TRADING_SYMBOLS = Arrays.asList(
             getEnv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT").split(",")
+    );
+
+    public static final Set<String> EXCLUDED_SYMBOLS = parseStringSet(
+            getEnv("EXCLUDED_SYMBOLS", "")
+    );
+
+    public static final BigDecimal SYMBOL_MIN_BACKTEST_TOTAL_PNL = new BigDecimal(
+            getEnv("SYMBOL_MIN_BACKTEST_TOTAL_PNL", "0")
+    );
+
+    public static final BigDecimal SYMBOL_MAX_BACKTEST_DRAWDOWN_USDT = new BigDecimal(
+            getEnv("SYMBOL_MAX_BACKTEST_DRAWDOWN_USDT", "500")
+    );
+
+    public static final BigDecimal SYMBOL_MIN_BACKTEST_WIN_RATE = new BigDecimal(
+            getEnv("SYMBOL_MIN_BACKTEST_WIN_RATE", "0.40")
+    );
+
+    public static final int SYMBOL_MIN_BACKTEST_CLOSED_TRADES = Integer.parseInt(
+            getEnv("SYMBOL_MIN_BACKTEST_CLOSED_TRADES", "10")
     );
     
     // 同时持仓的最大币种数量
@@ -92,6 +114,54 @@ public class Config {
 
     public static final BigDecimal FEE_PER_TRADE = new BigDecimal(
             getEnv("FEE_PER_TRADE", "0.003")
+    );
+
+    public static final BigDecimal LIVE_TAKER_FEE_RATE = new BigDecimal(
+            getEnv("LIVE_TAKER_FEE_RATE", "0.0005")
+    );
+
+    public static final BigDecimal LIVE_SLIPPAGE_RATE = new BigDecimal(
+            getEnv("LIVE_SLIPPAGE_RATE", "0.0002")
+    );
+
+    public static final boolean BACKTEST_MARKET_STATE_FILTER_ENABLED = Boolean.parseBoolean(
+            getEnv("BACKTEST_MARKET_STATE_FILTER_ENABLED", "false")
+    );
+
+    public static final int BACKTEST_MARKET_STATE_LOOKBACK_BARS = Integer.parseInt(
+            getEnv("BACKTEST_MARKET_STATE_LOOKBACK_BARS", "3")
+    );
+
+    public static final BigDecimal BACKTEST_MAX_LOOKBACK_RETURN = new BigDecimal(
+            getEnv("BACKTEST_MAX_LOOKBACK_RETURN", "0.08")
+    );
+
+    public static final BigDecimal BACKTEST_MAX_STEP_RETURN = new BigDecimal(
+            getEnv("BACKTEST_MAX_STEP_RETURN", "0.04")
+    );
+
+    public static final BigDecimal BACKTEST_MAX_ADVERSE_TREND_RETURN = new BigDecimal(
+            getEnv("BACKTEST_MAX_ADVERSE_TREND_RETURN", "0.03")
+    );
+
+    public static final BigDecimal BACKTEST_MAX_ATR_RATIO = new BigDecimal(
+            getEnv("BACKTEST_MAX_ATR_RATIO", "0.05")
+    );
+
+    public static final BigDecimal BACKTEST_MAX_REALIZED_VOLATILITY = new BigDecimal(
+            getEnv("BACKTEST_MAX_REALIZED_VOLATILITY", "0.04")
+    );
+
+    public static final BigDecimal BACKTEST_MAX_BID_ASK_SPREAD_RATIO = new BigDecimal(
+            getEnv("BACKTEST_MAX_BID_ASK_SPREAD_RATIO", "0.0015")
+    );
+
+    public static final BigDecimal BACKTEST_MAX_VOLUME_SPIKE_RATIO = new BigDecimal(
+            getEnv("BACKTEST_MAX_VOLUME_SPIKE_RATIO", "3")
+    );
+
+    public static final BigDecimal BACKTEST_MAX_FUNDING_PREDICTION_DEVIATION = new BigDecimal(
+            getEnv("BACKTEST_MAX_FUNDING_PREDICTION_DEVIATION", "0.0005")
     );
 
     public static final int RATE_TREND_CHECK_MINUTES = Integer.parseInt(
@@ -250,6 +320,21 @@ public class Config {
             }
         }
         return result;
+    }
+
+    private static Set<String> parseStringSet(String raw) {
+        Set<String> result = new HashSet<>();
+        for (String part : raw.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                result.add(trimmed.toUpperCase());
+            }
+        }
+        return result;
+    }
+
+    public static boolean isSymbolAllowed(String symbol) {
+        return symbol != null && !EXCLUDED_SYMBOLS.contains(symbol.toUpperCase());
     }
 
     /**
