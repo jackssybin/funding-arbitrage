@@ -43,7 +43,8 @@ public class RiskManager {
                     ? netNotional.add(notional)
                     : netNotional.subtract(notional);
         }
-        BigDecimal newPositionNotional = Config.POSITION_VALUE_USDT.multiply(BigDecimal.valueOf(Config.LEVERAGE));
+        // ✅ 修复：POSITION_VALUE_USDT 已经是杠杆后的名义价值，不需要再乘杠杆！
+        BigDecimal newPositionNotional = Config.POSITION_VALUE_USDT;
         totalNotional = totalNotional.add(newPositionNotional);
         netNotional = "LONG".equals(newSide)
                 ? netNotional.add(newPositionNotional)

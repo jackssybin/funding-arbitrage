@@ -868,8 +868,8 @@ public class FundingArbitrageBot {
             exchangeClient.setLeverage(symbol, Config.LEVERAGE);
 
             BigDecimal currentPrice = exchangeClient.getCurrentPrice(symbol);
+            // ✅ 修复：POSITION_VALUE_USDT 已经是杠杆后的名义价值，不需要再乘杠杆！
             BigDecimal quantity = Config.POSITION_VALUE_USDT
-                    .multiply(BigDecimal.valueOf(Config.LEVERAGE))
                     .divide(currentPrice, 12, RoundingMode.DOWN);
 
             log.info("当前价格: {} USDT", currentPrice);
@@ -899,9 +899,8 @@ public class FundingArbitrageBot {
             dailyReporter.recordOpen(symbol, side, alignedQuantity, fundingRate);
 
             BigDecimal annualized = fundingRate.abs()
-                    .multiply(new BigDecimal("1095"))
-                    .multiply(new BigDecimal(Config.LEVERAGE))
-                    .multiply(new BigDecimal("100"))
+                    .multiply(new BigDecimal("1095"))  // 3年=1095次资金费结算
+                    .multiply(new BigDecimal("100"))   // 转成百分比
                     .setScale(2, RoundingMode.HALF_UP);
 
             BigDecimal positionValue = currentPrice.multiply(alignedQuantity);
@@ -985,12 +984,15 @@ public class FundingArbitrageBot {
             // 记录盈亏用于熔断机制
             recordClosePnl(totalReturn);
 
+            // 平仓前先保存用于日报的数据（因为 position.close() 会清空状态）
+            BigDecimal finalPnl = closePnl;
+            BigDecimal totalFundingEarned = position.getTotalFundingEarned();
+            
             position.close();
             totalTrades++;
 
             // 日报记录平仓
-            BigDecimal finalPnl = position.getUnrealizedPnl() != null ? position.getUnrealizedPnl() : BigDecimal.ZERO;
-            dailyReporter.recordClose(symbol, position.getTotalFundingEarned(), finalPnl, reason);
+            dailyReporter.recordClose(symbol, totalFundingEarned, finalPnl, reason);
 
             try {
                 BigDecimal closeBalance = exchangeClient.getBalance();
