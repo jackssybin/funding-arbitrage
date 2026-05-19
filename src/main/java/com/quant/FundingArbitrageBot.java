@@ -462,14 +462,26 @@ public class FundingArbitrageBot {
         if (riskManager == null) {
             riskManager = new RiskManager();
         }
-        return riskManager.calculateNetExposure(positions);
+        BigDecimal accountBalance = BigDecimal.ZERO;
+        try {
+            accountBalance = exchangeClient.getBalance();
+        } catch (IOException e) {
+            log.warn("⚠️  获取账户余额失败: {}", e.getMessage());
+        }
+        return riskManager.calculateNetExposure(positions, accountBalance);
     }
 
     private boolean isExposureAcceptable(String newSide) {
         if (riskManager == null) {
             riskManager = new RiskManager();
         }
-        return riskManager.isExposureAcceptable(positions, newSide);
+        BigDecimal accountBalance = BigDecimal.ZERO;
+        try {
+            accountBalance = exchangeClient.getBalance();
+        } catch (IOException e) {
+            log.warn("⚠️  获取账户余额失败: {}", e.getMessage());
+        }
+        return riskManager.isExposureAcceptable(positions, newSide, accountBalance);
     }
     private boolean isTradingAllowed() {
         // 1. 连续亏损熔断
