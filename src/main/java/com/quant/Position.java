@@ -27,6 +27,8 @@ public class Position {
     private BigDecimal markPrice;           // 当前标记价格
     private BigDecimal gridProfit;          // 网格收益
     private List<GridOrder> gridOrders;     // 网格订单列表
+    private LocalDateTime lastStopLossTime; // 最后止损时间（冷却期用）
+    private java.util.LinkedList<BigDecimal> rateHistory = new java.util.LinkedList<>(); // 费率历史（用于稳定检查）
 
     public Position(String symbol) {
         this.symbol = symbol;
@@ -226,6 +228,63 @@ public class Position {
         this.hasPosition = false;
         this.positionSize = BigDecimal.ZERO;
         this.gridOrders.clear();
+    }
+
+    /**
+     * 记录止损时间（用于冷却期检查）
+     */
+    public void recordStopLossTime() {
+        this.lastStopLossTime = LocalDateTime.now();
+    }
+
+    /**
+     * 检查是否在止损冷却期内
+     * @return true=在冷却期内，不能开仓
+     */
+    public boolean isInStopLossCooldown() {
+        if (lastStopLossTime == null) {
+            return false;
+        }
+        long msSinceStopLoss = java.time.Duration.between(lastStopLossTime, LocalDateTime.now()).toMillis();
+        return msSinceStopLoss < Config.STOP_LOSS_COOLDOWN_MS;
+    }
+
+    /**
+     * 记录费率历史（用于费率稳定检查）
+     */
+    public void addRateHistory(BigDecimal rate) {
+        rateHistory.addLast(rate);
+        // 最多保留最近 N 次费率记录
+        while (rateHistory.size() > Config.RATE_STABLE_CHECK_COUNT + 1) {
+            rateHistory.removeFirst();
+        }
+    }
+
+    /**
+     * 检查费率是否稳定（最近 N 次都高于阈值）
+     * @param minRate 最小费率阈值
+     * @return true=费率稳定，可以开仓
+     */
+    public boolean isRateStable(BigDecimal minRate) {
+        // 历史记录不足，暂时认为不稳定
+        if (rateHistory.size() < Config.RATE_STABLE_CHECK_COUNT) {
+            return false;
+        }
+        // 检查最近 N 次费率是否都高于阈值
+        int checkCount = 0;
+        for (BigDecimal r : rateHistory) {
+            if (r.abs().compareTo(minRate) >= 0) {
+                checkCount++;
+            }
+        }
+        return checkCount >= Config.RATE_STABLE_CHECK_COUNT;
+    }
+
+    /**
+     * 获取费率历史记录数量（用于日志）
+     */
+    public int getRateHistorySize() {
+        return rateHistory.size();
     }
 
     /**

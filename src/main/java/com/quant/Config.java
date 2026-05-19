@@ -262,6 +262,16 @@ public class Config {
             getEnv("TAKE_PROFIT_RATIO", "0.08")
     );
 
+    // ========== 新增：同币种止损后冷却期（毫秒，默认2小时）==========
+    public static final long STOP_LOSS_COOLDOWN_MS = Long.parseLong(
+            getEnv("STOP_LOSS_COOLDOWN_MS", "7200000")
+    );
+
+    // ========== 新增：费率稳定检查次数（默认3次，即30分钟稳定）==========
+    public static final int RATE_STABLE_CHECK_COUNT = Integer.parseInt(
+            getEnv("RATE_STABLE_CHECK_COUNT", "3")
+    );
+
     public static final BigDecimal NEAR_FUNDING_TAKE_PROFIT_MULTIPLIER = new BigDecimal(
             getEnv("NEAR_FUNDING_TAKE_PROFIT_MULTIPLIER", "1.5")
     );

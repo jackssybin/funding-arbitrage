@@ -843,8 +843,25 @@ public class FundingArbitrageBot {
                 continue;
             }
 
+            // ✅ 新增：记录费率历史，用于稳定性检查
+            position.addRateHistory(rate);
+
+            // ✅ 新增：止损冷却期检查
+            if (!position.hasPosition() && position.isInStopLossCooldown()) {
+                continue;
+            }
+
+            // ✅ 新增：费率稳定性检查（复用前面的 minRate 变量）
+            if (!position.hasPosition() && !position.isRateStable(minRate)) {
+                if (position.getRateHistorySize() > 0) {
+                    log.debug("⏳ {} 费率还不稳定，当前已记录 {} 次，需要 {} 次", 
+                            symbol, position.getRateHistorySize(), Config.RATE_STABLE_CHECK_COUNT);
+                }
+                continue;
+            }
+
             if (!position.hasPosition() && currentPositionsCount < maxPositions) {
-                log.info("🎯 {} 费率 {}% 达标，准备开仓...",
+                log.info("🎯 {} 费率 {}% 达标且已稳定，准备开仓...",
                         symbol, rate.abs().multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
                 openPosition(symbol, rate);
                 currentPositionsCount++;
@@ -1031,6 +1048,12 @@ public class FundingArbitrageBot {
             BigDecimal finalPnl = closePnl;
             BigDecimal totalFundingEarned = position.getTotalFundingEarned();
             BigDecimal totalFees = positionValue.multiply(Config.LIVE_TAKER_FEE_RATE).add(closeFee);
+            
+            // ✅ 如果是止损平仓，记录止损时间（用于冷却期）
+            if (reason.contains("止损")) {
+                position.recordStopLossTime();
+                log.info("⏸️ {} 止损后进入{}小时冷却期，暂不开仓", symbol, Config.STOP_LOSS_COOLDOWN_MS / 3600000);
+            }
             
             position.close();
             totalTrades++;
