@@ -83,6 +83,44 @@ public class OkxClient implements ExchangeClient {
     // 行情接口（无签名）
     // ===================================================================
 
+    @Override
+    public MarketSnapshot getMarketSnapshot(String symbol) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            BigDecimal price = getCurrentPrice(symbol);
+            return new MarketSnapshot(symbol, price,
+                    price.multiply(new BigDecimal("1.01")),
+                    price.multiply(new BigDecimal("0.99")),
+                    BigDecimal.ZERO,
+                    price.multiply(new BigDecimal("0.9999")),
+                    price.multiply(new BigDecimal("1.0001")),
+                    BigDecimal.ZERO);
+        }
+
+        String instId = toOkxInstId(symbol);
+        String url = BASE_URL + "/api/v5/market/ticker?instId=" + instId;
+
+        Request request = new Request.Builder().url(url).get().build();
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = checkResponse(response, "market snapshot");
+            JsonNode ticker = mapper.readTree(body).get("data").get(0);
+            BigDecimal last = readDecimal(ticker, "last", "0");
+            BigDecimal high24h = readDecimal(ticker, "high24h", last.toPlainString());
+            BigDecimal low24h = readDecimal(ticker, "low24h", last.toPlainString());
+            BigDecimal volume = readDecimal(ticker, "volCcy24h", readDecimal(ticker, "vol24h", "0").toPlainString());
+            BigDecimal open24h = readDecimal(ticker, "open24h", last.toPlainString());
+            BigDecimal priceChangeRatio = open24h.compareTo(BigDecimal.ZERO) == 0
+                    ? BigDecimal.ZERO
+                    : last.subtract(open24h).divide(open24h, 8, RoundingMode.HALF_UP);
+            BigDecimal bid = ticker.hasNonNull("bidPx") && !ticker.get("bidPx").asText().isEmpty()
+                    ? new BigDecimal(ticker.get("bidPx").asText())
+                    : null;
+            BigDecimal ask = ticker.hasNonNull("askPx") && !ticker.get("askPx").asText().isEmpty()
+                    ? new BigDecimal(ticker.get("askPx").asText())
+                    : null;
+            return new MarketSnapshot(symbol, last, high24h, low24h, volume, bid, ask, priceChangeRatio);
+        }
+    }
+
     /**
      * 获取多个币种的资金费率
      * OKX 接口：GET /api/v5/public/funding-rate?instId=BTC-USDT-SWAP
@@ -568,6 +606,13 @@ public class OkxClient implements ExchangeClient {
             throw new IOException(action + " OKX 业务错误: code=" + json.get("code").asText() + ", msg=" + msg);
         }
         return body;
+    }
+
+    private static BigDecimal readDecimal(JsonNode node, String field, String fallback) {
+        if (node == null || !node.hasNonNull(field) || node.get(field).asText().isEmpty()) {
+            return new BigDecimal(fallback);
+        }
+        return new BigDecimal(node.get(field).asText());
     }
 
     /**

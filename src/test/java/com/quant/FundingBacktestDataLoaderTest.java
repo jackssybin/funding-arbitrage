@@ -52,8 +52,8 @@ class FundingBacktestDataLoaderTest {
         Path klineCsv = tempDir.resolve("rich-klines.csv");
         Path fundingCsv = tempDir.resolve("rich-funding.csv");
         Files.write(klineCsv, Arrays.asList(
-                "time,symbol,close,high,low,volume,bidAskSpreadRatio",
-                "2026-01-01 00:00:00,BTCUSDT,100,105,95,1234,0.0008"
+                "time,symbol,close,high,low,volume,bidPrice,askPrice",
+                "2026-01-01 00:00:00,BTCUSDT,100,105,95,1234,99.96,100.04"
         ));
         Files.write(fundingCsv, Arrays.asList(
                 "time,symbol,fundingRate,predictedFundingRate",
@@ -66,7 +66,9 @@ class FundingBacktestDataLoaderTest {
         assertEquals(0, bars.get(0).high.compareTo(new BigDecimal("105")));
         assertEquals(0, bars.get(0).low.compareTo(new BigDecimal("95")));
         assertEquals(0, bars.get(0).volume.compareTo(new BigDecimal("1234")));
-        assertEquals(0, bars.get(0).bidAskSpreadRatio.compareTo(new BigDecimal("0.0008")));
+        assertEquals(0, bars.get(0).bidPrice.compareTo(new BigDecimal("99.96")));
+        assertEquals(0, bars.get(0).askPrice.compareTo(new BigDecimal("100.04")));
+        assertEquals(0, bars.get(0).effectiveBidAskSpreadRatio().compareTo(new BigDecimal("0.00080000")));
         assertEquals(0, bars.get(0).predictedFundingRate.compareTo(new BigDecimal("0.0012")));
     }
 

@@ -58,6 +58,56 @@ public class BinanceFuturesClient implements ExchangeClient {
         this.baseUrl = Config.BINANCE_FUTURES_API;
     }
 
+    @Override
+    public MarketSnapshot getMarketSnapshot(String symbol) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            BigDecimal price = getCurrentPrice(symbol);
+            return new MarketSnapshot(symbol, price,
+                    price.multiply(new BigDecimal("1.01")),
+                    price.multiply(new BigDecimal("0.99")),
+                    BigDecimal.ZERO,
+                    price.multiply(new BigDecimal("0.9999")),
+                    price.multiply(new BigDecimal("1.0001")),
+                    BigDecimal.ZERO);
+        }
+
+        String tickerUrl = baseUrl + "/fapi/v1/ticker/24hr?symbol=" + symbol;
+        Request tickerRequest = new Request.Builder().url(tickerUrl).get().build();
+        JsonNode ticker;
+        try (Response response = httpClient.newCall(tickerRequest).execute()) {
+            String body = response.body().string();
+            if (!response.isSuccessful()) {
+                throw new IOException("market snapshot ticker request failed: " + response.code() + " " + body);
+            }
+            ticker = mapper.readTree(body);
+        }
+
+        BigDecimal lastPrice = readDecimal(ticker, "lastPrice", "0");
+        BigDecimal highPrice = readDecimal(ticker, "highPrice", lastPrice.toPlainString());
+        BigDecimal lowPrice = readDecimal(ticker, "lowPrice", lastPrice.toPlainString());
+        BigDecimal volume = readDecimal(ticker, "quoteVolume", readDecimal(ticker, "volume", "0").toPlainString());
+        BigDecimal priceChangeRatio = readDecimal(ticker, "priceChangePercent", "0")
+                .divide(new BigDecimal("100"), 8, RoundingMode.HALF_UP);
+
+        BigDecimal bidPrice = null;
+        BigDecimal askPrice = null;
+        String bookUrl = baseUrl + "/fapi/v1/ticker/bookTicker?symbol=" + symbol;
+        Request bookRequest = new Request.Builder().url(bookUrl).get().build();
+        try (Response response = httpClient.newCall(bookRequest).execute()) {
+            String body = response.body().string();
+            if (response.isSuccessful()) {
+                JsonNode book = mapper.readTree(body);
+                bidPrice = readDecimal(book, "bidPrice", "0");
+                askPrice = readDecimal(book, "askPrice", "0");
+            } else {
+                log.warn("{} book ticker request failed: {} {}", symbol, response.code(), body);
+            }
+        }
+
+        return new MarketSnapshot(symbol, lastPrice, highPrice, lowPrice, volume,
+                bidPrice, askPrice, priceChangeRatio);
+    }
+
     /**
      * 获取所有交易对的资金费率 [功能1: 多币种轮动]
      */
@@ -263,7 +313,8 @@ public class BinanceFuturesClient implements ExchangeClient {
         try (Response response = httpClient.newCall(request).execute()) {
             String body = response.body().string();
             JsonNode json = mapper.readTree(body);
-            return new BigDecimal(json.get("priceChangePercent").asText());
+            return new BigDecimal(json.get("priceChangePercent").asText())
+                    .divide(new BigDecimal("100"), 8, RoundingMode.HALF_UP);
         }
     }
 
@@ -608,6 +659,13 @@ public class BinanceFuturesClient implements ExchangeClient {
             sb.append(String.format("%02x", b));
         }
         return sb.toString();
+    }
+
+    private static BigDecimal readDecimal(JsonNode node, String field, String fallback) {
+        if (node == null || !node.hasNonNull(field) || node.get(field).asText().isEmpty()) {
+            return new BigDecimal(fallback);
+        }
+        return new BigDecimal(node.get(field).asText());
     }
 
     /**

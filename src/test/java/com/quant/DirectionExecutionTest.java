@@ -189,6 +189,15 @@ class DirectionExecutionTest {
         }
 
         @Override
+        public void updateSimulatedBalance(BigDecimal delta) {
+        }
+
+        @Override
+        public BigDecimal getSimulatedBalance() {
+            return BigDecimal.ZERO;
+        }
+
+        @Override
         public String buySpot(String symbol, BigDecimal quantity) {
             return "spot-buy";
         }

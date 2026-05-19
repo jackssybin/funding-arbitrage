@@ -33,6 +33,12 @@ public interface ExchangeClient {
     /** 获取24小时涨跌幅 */
     BigDecimal get24hChange(String symbol) throws IOException;
 
+    default MarketSnapshot getMarketSnapshot(String symbol) throws IOException {
+        BigDecimal price = getCurrentPrice(symbol);
+        return new MarketSnapshot(symbol, price, price, price, BigDecimal.ZERO,
+                null, null, get24hChange(symbol));
+    }
+
     /** 获取当前持仓（兼容不同交易所） */
     BigDecimal getCurrentPosition(String symbol) throws IOException;
 

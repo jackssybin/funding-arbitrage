@@ -62,9 +62,31 @@ class MarketDataServiceTest {
         assertTrue(service.getFundingRates().containsKey("BTCUSDT"));
     }
 
+    @Test
+    void rejectsEntryWhenLiveBidAskSpreadIsTooWide() throws Exception {
+        FakeExchangeClient client = new FakeExchangeClient();
+        client.currentRate = new BigDecimal("0.0010");
+        client.predictedRate = new BigDecimal("0.0010");
+        client.snapshot = new MarketSnapshot("BTCUSDT",
+                new BigDecimal("100"),
+                new BigDecimal("101"),
+                new BigDecimal("99"),
+                new BigDecimal("1000"),
+                new BigDecimal("99"),
+                new BigDecimal("101"),
+                BigDecimal.ZERO);
+
+        MarketDataService service = new MarketDataService(client);
+        service.updateFundingRates(Collections.singletonList("BTCUSDT"));
+        service.update24hChanges(Collections.singletonList("BTCUSDT"));
+
+        assertFalse(service.isMarketStateAcceptableForEntry("BTCUSDT", client.currentRate));
+    }
+
     private static class FakeExchangeClient implements ExchangeClient {
         BigDecimal currentRate = BigDecimal.ZERO;
         BigDecimal predictedRate = BigDecimal.ZERO;
+        MarketSnapshot snapshot;
         boolean failAllFundingRates;
 
         @Override
@@ -93,6 +115,15 @@ class MarketDataServiceTest {
         @Override
         public BigDecimal get24hChange(String symbol) {
             return BigDecimal.ZERO;
+        }
+
+        @Override
+        public MarketSnapshot getMarketSnapshot(String symbol) {
+            if (snapshot != null) {
+                return snapshot;
+            }
+            return new MarketSnapshot(symbol, BigDecimal.ONE, BigDecimal.ONE, BigDecimal.ONE,
+                    BigDecimal.ZERO, null, null, BigDecimal.ZERO);
         }
 
         @Override
@@ -131,6 +162,15 @@ class MarketDataServiceTest {
 
         @Override
         public BigDecimal getBalance() {
+            return BigDecimal.ZERO;
+        }
+
+        @Override
+        public void updateSimulatedBalance(BigDecimal delta) {
+        }
+
+        @Override
+        public BigDecimal getSimulatedBalance() {
             return BigDecimal.ZERO;
         }
 

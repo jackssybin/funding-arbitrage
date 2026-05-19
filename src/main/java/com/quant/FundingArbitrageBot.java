@@ -461,13 +461,20 @@ public class FundingArbitrageBot {
         return marketDataService.isRateTrendGood(symbol, currentRate);
     }
 
+    private boolean isLiveMarketStateAcceptable(String symbol, BigDecimal currentRate) {
+        if (marketDataService == null) {
+            marketDataService = new MarketDataService(exchangeClient);
+        }
+        return marketDataService.isMarketStateAcceptableForEntry(symbol, currentRate);
+    }
+
     private BigDecimal calculateNetExposure() {
         if (riskManager == null) {
             riskManager = new RiskManager();
         }
         BigDecimal accountBalance = BigDecimal.ZERO;
         try {
-            accountBalance = exchangeClient.getBalance();
+            accountBalance = exchangeClient == null ? new BigDecimal("10000") : exchangeClient.getBalance();
         } catch (IOException e) {
             log.warn("⚠️  获取账户余额失败: {}", e.getMessage());
         }
@@ -480,7 +487,7 @@ public class FundingArbitrageBot {
         }
         BigDecimal accountBalance = BigDecimal.ZERO;
         try {
-            accountBalance = exchangeClient.getBalance();
+            accountBalance = exchangeClient == null ? new BigDecimal("10000") : exchangeClient.getBalance();
         } catch (IOException e) {
             log.warn("⚠️  获取账户余额失败: {}", e.getMessage());
         }
@@ -791,6 +798,10 @@ public class FundingArbitrageBot {
             String symbol = entry.getKey();
             BigDecimal rate = entry.getValue();
             Position position = positions.get(symbol);
+            if (!Config.isSymbolAllowed(symbol)) {
+                log.info("Skip {} because it is excluded by symbol eligibility config", symbol);
+                continue;
+            }
 
             // P2 修复：跳过无效的异常费率数据
             if (rate.compareTo(Config.MIN_VALID_FUNDING_RATE) < 0 || rate.compareTo(Config.MAX_VALID_FUNDING_RATE) > 0) {
@@ -820,6 +831,9 @@ public class FundingArbitrageBot {
 
             // 【新增2: 费率趋势检查 - 不接下落的刀
             if (!isRateTrendGood(symbol, rate)) {
+                continue;
+            }
+            if (!isLiveMarketStateAcceptable(symbol, rate)) {
                 continue;
             }
 

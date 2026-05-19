@@ -220,11 +220,14 @@ public class FundingBacktestEngine {
         if (atrRatio(history, startIndex).compareTo(config.maxAtrRatio) > 0) {
             return MarketStateDecision.rejected("ATR");
         }
+        if (current.highLowRangeRatio().compareTo(config.maxHighLowRangeRatio) > 0) {
+            return MarketStateDecision.rejected("HIGH_LOW_RANGE");
+        }
         if (realizedVolatility(history, startIndex).compareTo(config.maxRealizedVolatility) > 0) {
             return MarketStateDecision.rejected("REALIZED_VOLATILITY");
         }
-        if (current.bidAskSpreadRatio != null
-                && current.bidAskSpreadRatio.compareTo(config.maxBidAskSpreadRatio) > 0) {
+        BigDecimal spreadRatio = current.effectiveBidAskSpreadRatio();
+        if (spreadRatio != null && spreadRatio.compareTo(config.maxBidAskSpreadRatio) > 0) {
             return MarketStateDecision.rejected("BID_ASK_SPREAD");
         }
         if (volumeSpikeRatio(history, startIndex).compareTo(config.maxVolumeSpikeRatio) > 0) {
@@ -519,6 +522,8 @@ public class FundingBacktestEngine {
         public final BigDecimal high;
         public final BigDecimal low;
         public final BigDecimal volume;
+        public final BigDecimal bidPrice;
+        public final BigDecimal askPrice;
         public final BigDecimal bidAskSpreadRatio;
         public final BigDecimal fundingRate;
         public final BigDecimal predictedFundingRate;
@@ -537,16 +542,48 @@ public class FundingBacktestEngine {
         public MarketBar(LocalDateTime time, String symbol, BigDecimal price, BigDecimal high, BigDecimal low,
                          BigDecimal volume, BigDecimal bidAskSpreadRatio, BigDecimal fundingRate,
                          BigDecimal predictedFundingRate, boolean fundingSettlement) {
+            this(time, symbol, price, high, low, volume, null, null, bidAskSpreadRatio,
+                    fundingRate, predictedFundingRate, fundingSettlement);
+        }
+
+        public MarketBar(LocalDateTime time, String symbol, BigDecimal price, BigDecimal high, BigDecimal low,
+                         BigDecimal volume, BigDecimal bidPrice, BigDecimal askPrice,
+                         BigDecimal bidAskSpreadRatio, BigDecimal fundingRate,
+                         BigDecimal predictedFundingRate, boolean fundingSettlement) {
             this.time = time;
             this.symbol = symbol;
             this.price = price;
             this.high = high == null ? price : high;
             this.low = low == null ? price : low;
             this.volume = volume;
+            this.bidPrice = bidPrice;
+            this.askPrice = askPrice;
             this.bidAskSpreadRatio = bidAskSpreadRatio;
             this.fundingRate = fundingRate;
             this.predictedFundingRate = predictedFundingRate;
             this.fundingSettlement = fundingSettlement;
+        }
+
+        public BigDecimal effectiveBidAskSpreadRatio() {
+            if (bidAskSpreadRatio != null) {
+                return bidAskSpreadRatio;
+            }
+            if (bidPrice == null || askPrice == null || bidPrice.compareTo(BigDecimal.ZERO) <= 0
+                    || askPrice.compareTo(BigDecimal.ZERO) <= 0) {
+                return null;
+            }
+            BigDecimal mid = bidPrice.add(askPrice).divide(new BigDecimal("2"), 12, RoundingMode.HALF_UP);
+            if (mid.compareTo(BigDecimal.ZERO) <= 0) {
+                return null;
+            }
+            return askPrice.subtract(bidPrice).abs().divide(mid, 8, RoundingMode.HALF_UP);
+        }
+
+        public BigDecimal highLowRangeRatio() {
+            if (price == null || price.compareTo(BigDecimal.ZERO) <= 0 || high == null || low == null) {
+                return BigDecimal.ZERO;
+            }
+            return high.subtract(low).abs().divide(price, 8, RoundingMode.HALF_UP);
         }
     }
 
@@ -565,6 +602,7 @@ public class FundingBacktestEngine {
         public BigDecimal maxStepReturn = Config.BACKTEST_MAX_STEP_RETURN;
         public BigDecimal maxAdverseTrendReturn = Config.BACKTEST_MAX_ADVERSE_TREND_RETURN;
         public BigDecimal maxAtrRatio = Config.BACKTEST_MAX_ATR_RATIO;
+        public BigDecimal maxHighLowRangeRatio = Config.BACKTEST_MAX_HIGH_LOW_RANGE_RATIO;
         public BigDecimal maxRealizedVolatility = Config.BACKTEST_MAX_REALIZED_VOLATILITY;
         public BigDecimal maxBidAskSpreadRatio = Config.BACKTEST_MAX_BID_ASK_SPREAD_RATIO;
         public BigDecimal maxVolumeSpikeRatio = Config.BACKTEST_MAX_VOLUME_SPIKE_RATIO;

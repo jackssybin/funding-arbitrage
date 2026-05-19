@@ -128,6 +128,26 @@ public class Config {
             getEnv("BACKTEST_MARKET_STATE_FILTER_ENABLED", "false")
     );
 
+    public static final boolean LIVE_MARKET_STATE_FILTER_ENABLED = Boolean.parseBoolean(
+            getEnv("LIVE_MARKET_STATE_FILTER_ENABLED", "true")
+    );
+
+    public static final BigDecimal LIVE_MAX_HIGH_LOW_RANGE_RATIO = new BigDecimal(
+            getEnv("LIVE_MAX_HIGH_LOW_RANGE_RATIO", "0.05")
+    );
+
+    public static final BigDecimal LIVE_MAX_BID_ASK_SPREAD_RATIO = new BigDecimal(
+            getEnv("LIVE_MAX_BID_ASK_SPREAD_RATIO", "0.0015")
+    );
+
+    public static final BigDecimal LIVE_MAX_VOLUME_SPIKE_RATIO = new BigDecimal(
+            getEnv("LIVE_MAX_VOLUME_SPIKE_RATIO", "3")
+    );
+
+    public static final BigDecimal LIVE_MAX_FUNDING_PREDICTION_DEVIATION = new BigDecimal(
+            getEnv("LIVE_MAX_FUNDING_PREDICTION_DEVIATION", "0.0005")
+    );
+
     public static final int BACKTEST_MARKET_STATE_LOOKBACK_BARS = Integer.parseInt(
             getEnv("BACKTEST_MARKET_STATE_LOOKBACK_BARS", "3")
     );
@@ -148,20 +168,25 @@ public class Config {
             getEnv("BACKTEST_MAX_ATR_RATIO", "0.05")
     );
 
+    public static final BigDecimal BACKTEST_MAX_HIGH_LOW_RANGE_RATIO = new BigDecimal(
+            getEnv("BACKTEST_MAX_HIGH_LOW_RANGE_RATIO", LIVE_MAX_HIGH_LOW_RANGE_RATIO.toPlainString())
+    );
+
     public static final BigDecimal BACKTEST_MAX_REALIZED_VOLATILITY = new BigDecimal(
             getEnv("BACKTEST_MAX_REALIZED_VOLATILITY", "0.04")
     );
 
     public static final BigDecimal BACKTEST_MAX_BID_ASK_SPREAD_RATIO = new BigDecimal(
-            getEnv("BACKTEST_MAX_BID_ASK_SPREAD_RATIO", "0.0015")
+            getEnv("BACKTEST_MAX_BID_ASK_SPREAD_RATIO", LIVE_MAX_BID_ASK_SPREAD_RATIO.toPlainString())
     );
 
     public static final BigDecimal BACKTEST_MAX_VOLUME_SPIKE_RATIO = new BigDecimal(
-            getEnv("BACKTEST_MAX_VOLUME_SPIKE_RATIO", "3")
+            getEnv("BACKTEST_MAX_VOLUME_SPIKE_RATIO", LIVE_MAX_VOLUME_SPIKE_RATIO.toPlainString())
     );
 
     public static final BigDecimal BACKTEST_MAX_FUNDING_PREDICTION_DEVIATION = new BigDecimal(
-            getEnv("BACKTEST_MAX_FUNDING_PREDICTION_DEVIATION", "0.0005")
+            getEnv("BACKTEST_MAX_FUNDING_PREDICTION_DEVIATION",
+                    LIVE_MAX_FUNDING_PREDICTION_DEVIATION.toPlainString())
     );
 
     public static final int RATE_TREND_CHECK_MINUTES = Integer.parseInt(

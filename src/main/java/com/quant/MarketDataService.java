@@ -21,7 +21,9 @@ public class MarketDataService {
     private final Map<String, BigDecimal> fundingRates = new HashMap<>();
     private final Map<String, BigDecimal> predictedFundingRates = new HashMap<>();
     private final Map<String, BigDecimal> price24hChange = new HashMap<>();
+    private final Map<String, MarketSnapshot> marketSnapshots = new HashMap<>();
     private final Map<String, List<BigDecimal>> rateHistory = new HashMap<>();
+    private final Map<String, List<BigDecimal>> volumeHistory = new HashMap<>();
     private LocalDateTime lastRateUpdate;
 
     public MarketDataService(ExchangeClient exchangeClient) {
@@ -38,9 +40,11 @@ public class MarketDataService {
     public void update24hChanges(List<String> symbols) {
         for (String symbol : symbols) {
             try {
-                BigDecimal change = read24hChange(symbol);
-                if (change != null) {
-                    price24hChange.put(symbol, change);
+                MarketSnapshot snapshot = readMarketSnapshot(symbol);
+                if (snapshot != null) {
+                    marketSnapshots.put(symbol, snapshot);
+                    price24hChange.put(symbol, snapshot.priceChangeRatio);
+                    appendVolumeHistory(symbol, snapshot.volume24h);
                 }
             } catch (Exception e) {
                 log.warn("更新 {} 24h 涨跌幅失败: {}", symbol, e.getMessage());
@@ -100,6 +104,50 @@ public class MarketDataService {
             return true;
         }
         return false;
+    }
+
+    public boolean isMarketStateAcceptableForEntry(String symbol, BigDecimal currentRate) {
+        if (!Config.LIVE_MARKET_STATE_FILTER_ENABLED) {
+            return true;
+        }
+        BigDecimal predicted = predictedFundingRates.get(symbol);
+        if (predicted != null && predicted.signum() != 0 && currentRate.signum() != predicted.signum()) {
+            log.warn("鈿狅笍  {} 棰勬祴璧勯噾璐圭巼涓庡綋鍓嶈垂鐜囨柟鍚戠浉鍙嶏紝璺宠繃瀹炵洏寮€浠? current={}, predicted={}",
+                    symbol, currentRate, predicted);
+            return false;
+        }
+        if (predicted != null && predicted.signum() != 0
+                && currentRate.subtract(predicted).abs()
+                .compareTo(Config.LIVE_MAX_FUNDING_PREDICTION_DEVIATION) > 0) {
+            log.warn("{} current funding and predicted funding deviation too wide: current={}, predicted={}",
+                    symbol, currentRate, predicted);
+            return false;
+        }
+        if (isExtremeMarket(symbol, currentRate)) {
+            return false;
+        }
+        MarketSnapshot snapshot = marketSnapshots.get(symbol);
+        if (snapshot != null) {
+            BigDecimal spreadRatio = snapshot.spreadRatio();
+            if (spreadRatio.compareTo(Config.LIVE_MAX_BID_ASK_SPREAD_RATIO) > 0) {
+                log.warn("{} bid/ask spread too wide: {}%", symbol,
+                        spreadRatio.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
+                return false;
+            }
+            BigDecimal highLowRangeRatio = snapshot.highLowRangeRatio();
+            if (highLowRangeRatio.compareTo(Config.LIVE_MAX_HIGH_LOW_RANGE_RATIO) > 0) {
+                log.warn("{} 24h high/low range too wide: {}%", symbol,
+                        highLowRangeRatio.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
+                return false;
+            }
+            BigDecimal volumeSpikeRatio = volumeSpikeRatio(symbol);
+            if (volumeSpikeRatio.compareTo(Config.LIVE_MAX_VOLUME_SPIKE_RATIO) > 0) {
+                log.warn("{} 24h volume spike too high: {}x", symbol,
+                        volumeSpikeRatio.setScale(2, RoundingMode.HALF_UP));
+                return false;
+            }
+        }
+        return isRateTrendGood(symbol, currentRate);
     }
 
     public boolean isRateTrendGood(String symbol, BigDecimal currentRate) {
@@ -214,10 +262,59 @@ public class MarketDataService {
         return null;
     }
 
+    private MarketSnapshot readMarketSnapshot(String symbol) {
+        for (ExchangeClient client : exchangeClients) {
+            try {
+                MarketSnapshot snapshot = client.getMarketSnapshot(symbol);
+                if (snapshot != null) {
+                    return snapshot;
+                }
+            } catch (IOException e) {
+                log.warn("{} {} market snapshot read failed, trying fallback source: {}",
+                        client.getExchangeName(), symbol, e.getMessage());
+            }
+        }
+        BigDecimal change = read24hChange(symbol);
+        if (change == null) {
+            return null;
+        }
+        return new MarketSnapshot(symbol, BigDecimal.ZERO, null, null, BigDecimal.ZERO,
+                null, null, change);
+    }
+
+    private BigDecimal volumeSpikeRatio(String symbol) {
+        List<BigDecimal> history = volumeHistory.get(symbol);
+        if (history == null || history.size() < 3) {
+            return BigDecimal.ZERO;
+        }
+        BigDecimal latest = history.get(history.size() - 1);
+        BigDecimal previousAverage = BigDecimal.ZERO;
+        for (int i = 0; i < history.size() - 1; i++) {
+            previousAverage = previousAverage.add(history.get(i));
+        }
+        previousAverage = previousAverage.divide(new BigDecimal(history.size() - 1), 8, RoundingMode.HALF_UP);
+        if (previousAverage.compareTo(BigDecimal.ZERO) <= 0) {
+            return BigDecimal.ZERO;
+        }
+        return latest.divide(previousAverage, 8, RoundingMode.HALF_UP);
+    }
+
     private void appendRateHistory(String symbol, BigDecimal rate) {
         rateHistory.computeIfAbsent(symbol, k -> new LinkedList<>());
         List<BigDecimal> history = rateHistory.get(symbol);
         history.add(rate);
+        while (history.size() > Config.RATE_HISTORY_LIMIT) {
+            ((LinkedList<BigDecimal>) history).removeFirst();
+        }
+    }
+
+    private void appendVolumeHistory(String symbol, BigDecimal volume) {
+        if (volume == null || volume.compareTo(BigDecimal.ZERO) <= 0) {
+            return;
+        }
+        volumeHistory.computeIfAbsent(symbol, k -> new LinkedList<>());
+        List<BigDecimal> history = volumeHistory.get(symbol);
+        history.add(volume);
         while (history.size() > Config.RATE_HISTORY_LIMIT) {
             ((LinkedList<BigDecimal>) history).removeFirst();
         }

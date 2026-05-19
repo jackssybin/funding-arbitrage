@@ -91,7 +91,8 @@ public class FundingBacktestDataLoader {
             }
             bars.add(new FundingBacktestEngine.MarketBar(
                     kline.time, kline.symbol, kline.closePrice, kline.highPrice, kline.lowPrice, kline.volume,
-                    kline.bidAskSpreadRatio, fundingRate, predictedFundingRate, settlement));
+                    kline.bidPrice, kline.askPrice, kline.bidAskSpreadRatio,
+                    fundingRate, predictedFundingRate, settlement));
         }
         return bars;
     }
@@ -226,6 +227,8 @@ public class FundingBacktestDataLoader {
         BigDecimal high = optionalDecimal(parts, header, "high");
         BigDecimal low = optionalDecimal(parts, header, "low");
         BigDecimal volume = optionalDecimal(parts, header, "volume");
+        BigDecimal bidPrice = optionalDecimal(parts, header, "bidPrice");
+        BigDecimal askPrice = optionalDecimal(parts, header, "askPrice");
         BigDecimal spread = optionalDecimal(parts, header, "bidAskSpreadRatio");
         return new KlinePoint(
                 parseTime(value(parts, header, "time", 0)),
@@ -234,6 +237,8 @@ public class FundingBacktestDataLoader {
                 high == null ? close : high,
                 low == null ? close : low,
                 volume == null ? BigDecimal.ZERO : volume,
+                bidPrice,
+                askPrice,
                 spread);
     }
 
@@ -275,20 +280,30 @@ public class FundingBacktestDataLoader {
         public final BigDecimal highPrice;
         public final BigDecimal lowPrice;
         public final BigDecimal volume;
+        public final BigDecimal bidPrice;
+        public final BigDecimal askPrice;
         public final BigDecimal bidAskSpreadRatio;
 
         public KlinePoint(LocalDateTime time, String symbol, BigDecimal closePrice) {
-            this(time, symbol, closePrice, closePrice, closePrice, BigDecimal.ZERO, null);
+            this(time, symbol, closePrice, closePrice, closePrice, BigDecimal.ZERO, null, null, null);
         }
 
         public KlinePoint(LocalDateTime time, String symbol, BigDecimal closePrice, BigDecimal highPrice,
                           BigDecimal lowPrice, BigDecimal volume, BigDecimal bidAskSpreadRatio) {
+            this(time, symbol, closePrice, highPrice, lowPrice, volume, null, null, bidAskSpreadRatio);
+        }
+
+        public KlinePoint(LocalDateTime time, String symbol, BigDecimal closePrice, BigDecimal highPrice,
+                          BigDecimal lowPrice, BigDecimal volume, BigDecimal bidPrice, BigDecimal askPrice,
+                          BigDecimal bidAskSpreadRatio) {
             this.time = time;
             this.symbol = symbol;
             this.closePrice = closePrice;
             this.highPrice = highPrice;
             this.lowPrice = lowPrice;
             this.volume = volume;
+            this.bidPrice = bidPrice;
+            this.askPrice = askPrice;
             this.bidAskSpreadRatio = bidAskSpreadRatio;
         }
     }

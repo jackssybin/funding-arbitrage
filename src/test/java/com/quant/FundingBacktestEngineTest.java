@@ -66,4 +66,27 @@ class FundingBacktestEngineTest {
         assertEquals(0, result.symbolStats.get("ETHUSDT").totalPnl.compareTo(new BigDecimal("47.000000")));
         assertEquals(0, result.fundingIncomeRatio.compareTo(BigDecimal.ZERO));
     }
+
+    @Test
+    void marketStateFilterRejectsWideHighLowRangeLikeLiveFilter() {
+        FundingBacktestEngine engine = new FundingBacktestEngine();
+        FundingBacktestEngine.BacktestConfig config = new FundingBacktestEngine.BacktestConfig();
+        config.marketStateFilterEnabled = true;
+        config.marketStateLookbackBars = 1;
+        config.openRate = new BigDecimal("0.0010");
+        config.maxAtrRatio = new BigDecimal("1");
+        config.maxHighLowRangeRatio = new BigDecimal("0.05");
+
+        FundingBacktestEngine.BacktestResult result = engine.run(Arrays.asList(
+                new FundingBacktestEngine.MarketBar(LocalDateTime.parse("2026-01-01T00:00:00"),
+                        "BTCUSDT", new BigDecimal("100"), new BigDecimal("100"), new BigDecimal("100"),
+                        BigDecimal.ZERO, null, new BigDecimal("0.0001"), null, true),
+                new FundingBacktestEngine.MarketBar(LocalDateTime.parse("2026-01-01T08:00:00"),
+                        "BTCUSDT", new BigDecimal("100"), new BigDecimal("110"), new BigDecimal("90"),
+                        BigDecimal.ZERO, null, new BigDecimal("0.0010"), null, true)
+        ), config);
+
+        assertEquals(1, result.filteredByMarketState);
+        assertTrue(result.filteredByReason.containsKey("HIGH_LOW_RANGE"));
+    }
 }
