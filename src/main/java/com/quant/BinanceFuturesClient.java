@@ -34,6 +34,24 @@ public class BinanceFuturesClient implements ExchangeClient {
     private final String secretKey;
     private final String baseUrl;
 
+    // 模拟模式余额维护（解决余额永远10000的BUG）
+    private BigDecimal simulatedBalance = new BigDecimal("10000");
+
+    @Override
+    public void updateSimulatedBalance(BigDecimal delta) {
+        if (Config.SIMULATION_MODE) {
+            this.simulatedBalance = this.simulatedBalance.add(delta);
+            log.info("💰 [模拟模式] 余额更新: {} USDT ({})",
+                    this.simulatedBalance.setScale(2, RoundingMode.HALF_UP),
+                    delta.compareTo(BigDecimal.ZERO) >= 0 ? "+" + delta.setScale(2, RoundingMode.HALF_UP) : delta.setScale(2, RoundingMode.HALF_UP));
+        }
+    }
+
+    @Override
+    public BigDecimal getSimulatedBalance() {
+        return this.simulatedBalance;
+    }
+
     public BinanceFuturesClient(String apiKey, String secretKey) {
         this.apiKey = apiKey;
         this.secretKey = secretKey;
@@ -502,7 +520,7 @@ public class BinanceFuturesClient implements ExchangeClient {
      */
     public BigDecimal getBalance() throws IOException {
         if (Config.SIMULATION_MODE) {
-            return new BigDecimal("10000");
+            return this.simulatedBalance;
         }
 
         long timestamp = System.currentTimeMillis();

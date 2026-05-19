@@ -306,6 +306,9 @@ public class FundingArbitrageBot {
             position.setLastFundingRate(currentRate);
             totalPnl = totalPnl.add(earning);
 
+            // ✅ 资金费结算时更新模拟账户余额
+            exchangeClient.updateSimulatedBalance(earning);
+
             // 持久化记录
             persistence.recordFunding(position.getSymbol(), earning, currentRate);
             // 日报记录
@@ -910,28 +913,33 @@ public class FundingArbitrageBot {
             // 日报记录开仓
             dailyReporter.recordOpen(symbol, side, alignedQuantity, fundingRate);
 
+            // ✅ 计算开仓手续费（双边：开仓）
+            BigDecimal positionValue = currentPrice.multiply(alignedQuantity);
+            BigDecimal openFee = positionValue.multiply(Config.LIVE_TAKER_FEE_RATE);
+            // ✅ 更新模拟账户余额：扣除开仓手续费
+            exchangeClient.updateSimulatedBalance(openFee.negate());
+
             BigDecimal annualized = fundingRate.abs()
                     .multiply(new BigDecimal("1095"))  // 3年=1095次资金费结算
                     .multiply(new BigDecimal("100"))   // 转成百分比
                     .setScale(2, RoundingMode.HALF_UP);
 
-            BigDecimal positionValue = currentPrice.multiply(alignedQuantity);
             BigDecimal expectedEarningOpen = positionValue.multiply(fundingRate.abs());
             
             try {
                 BigDecimal openBalance = exchangeClient.getBalance();
                 log.info("");
-                log.info("🎉 开仓完成！ {} {} ({}), 预计年化 {}%", symbol, sideName, alignedQuantity, annualized);
+                log.info("🎉 开仓完成！ {} {} ({}), 预计年化 {}%, 手续费 {} USDT", symbol, sideName, alignedQuantity, annualized, openFee.setScale(4, RoundingMode.HALF_UP));
                 log.info("");
                 // 飞书推送：开仓通知
-                feishuNotifier.sendOpenPosition(symbol, sideName, alignedQuantity, fundingRate, annualized, openBalance, expectedEarningOpen);
+                feishuNotifier.sendOpenPosition(symbol, sideName, alignedQuantity, fundingRate, annualized, openBalance, expectedEarningOpen, openFee);
             } catch (IOException e) {
                 log.warn("⚠️  获取余额失败，飞书通知将不带余额信息: {}", e.getMessage());
                 log.info("");
-                log.info("🎉 开仓完成！ {} {} ({}), 预计年化 {}%", symbol, sideName, alignedQuantity, annualized);
+                log.info("🎉 开仓完成！ {} {} ({}), 预计年化 {}%, 手续费 {} USDT", symbol, sideName, alignedQuantity, annualized, openFee.setScale(4, RoundingMode.HALF_UP));
                 log.info("");
                 // 飞书推送：开仓通知
-                feishuNotifier.sendOpenPosition(symbol, sideName, alignedQuantity, fundingRate, annualized, BigDecimal.ZERO, expectedEarningOpen);
+                feishuNotifier.sendOpenPosition(symbol, sideName, alignedQuantity, fundingRate, annualized, BigDecimal.ZERO, expectedEarningOpen, openFee);
             }
 
         } catch (Exception e) {
@@ -980,13 +988,22 @@ public class FundingArbitrageBot {
             // 只计算买卖盈亏（资金费已经在结算时统计过了）
             BigDecimal totalReturn = closePnl;
 
+            // ✅ 计算平仓手续费
+            BigDecimal positionValue = position.getEntryPrice().multiply(position.getPositionSize());
+            BigDecimal closeFee = positionValue.multiply(Config.LIVE_TAKER_FEE_RATE);
+            // ✅ 更新模拟账户余额：加上平仓盈亏，扣除平仓手续费
+            //   注意：资金费收益已经在每次结算时加到totalPnl了，这里只加买卖盈亏
+            exchangeClient.updateSimulatedBalance(closePnl.subtract(closeFee));
+
             // 动态止损相关信息
             BigDecimal safetyBuffer = position.getSafetyBuffer();
             boolean principalSafe = position.isPrincipalSafe();
             
-            log.info("💵 平仓结算: 资金费收益{} USDT(已累计), 本次买卖盈亏{} USDT (持仓{}小时, {}次结算, 安全垫{} USDT, 保本:{})",
+            log.info("💵 平仓结算: 资金费收益{} USDT(已累计), 本次买卖盈亏{} USDT, 开仓手续费{} USDT, 平仓手续费{} USDT (持仓{}小时, {}次结算, 安全垫{} USDT, 保本:{})",
                     position.getTotalFundingEarned().setScale(4, RoundingMode.HALF_UP),
                     closePnl.setScale(4, RoundingMode.HALF_UP),
+                    positionValue.multiply(Config.LIVE_TAKER_FEE_RATE).setScale(4, RoundingMode.HALF_UP),
+                    closeFee.setScale(4, RoundingMode.HALF_UP),
                     position.getHoldingHours(),
                     position.getFundingCount(),
                     safetyBuffer.setScale(4, RoundingMode.HALF_UP),
@@ -999,6 +1016,7 @@ public class FundingArbitrageBot {
             // 平仓前先保存用于日报的数据（因为 position.close() 会清空状态）
             BigDecimal finalPnl = closePnl;
             BigDecimal totalFundingEarned = position.getTotalFundingEarned();
+            BigDecimal totalFees = positionValue.multiply(Config.LIVE_TAKER_FEE_RATE).add(closeFee);
             
             position.close();
             totalTrades++;
@@ -1012,14 +1030,14 @@ public class FundingArbitrageBot {
                 log.info("✅ 平仓完成！");
                 log.info("");
                 // 飞书推送：平仓通知（带详细原因）
-                feishuNotifier.sendClosePosition(symbol, position.getTotalFundingEarned(), finalPnl, reason, closeBalance);
+                feishuNotifier.sendClosePosition(symbol, totalFundingEarned, finalPnl, reason, closeBalance, totalFees);
             } catch (IOException e) {
                 log.warn("⚠️  获取余额失败，飞书通知将不带余额信息: {}", e.getMessage());
                 log.info("");
                 log.info("✅ 平仓完成！");
                 log.info("");
                 // 飞书推送：平仓通知（带详细原因）
-                feishuNotifier.sendClosePosition(symbol, position.getTotalFundingEarned(), finalPnl, reason, BigDecimal.ZERO);
+                feishuNotifier.sendClosePosition(symbol, totalFundingEarned, finalPnl, reason, BigDecimal.ZERO, totalFees);
             }
 
         } catch (Exception e) {

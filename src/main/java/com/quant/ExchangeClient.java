@@ -68,6 +68,12 @@ public interface ExchangeClient {
     /** 查询合约账户可用余额 (USDT) */
     BigDecimal getBalance() throws IOException;
 
+    /** 更新模拟账户余额（仅模拟模式有效） */
+    void updateSimulatedBalance(BigDecimal delta);
+
+    /** 获取模拟账户余额（仅模拟模式有效） */
+    BigDecimal getSimulatedBalance();
+
     // ===== 现货操作 =====
 
     /** 现货买入 */

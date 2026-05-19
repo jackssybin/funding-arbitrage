@@ -43,7 +43,7 @@ public class FeishuNotifier {
     /**
      * 发送开仓通知
      */
-    public void sendOpenPosition(String symbol, String side, BigDecimal quantity, BigDecimal rate, BigDecimal annualized, BigDecimal balance, BigDecimal expectedEarning) {
+    public void sendOpenPosition(String symbol, String side, BigDecimal quantity, BigDecimal rate, BigDecimal annualized, BigDecimal balance, BigDecimal expectedEarning, BigDecimal fee) {
         if (!enabled) return;
         
         String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
@@ -57,6 +57,7 @@ public class FeishuNotifier {
             "费率: %s%%\n" +
             "费率预期收益: %s USDT\n" +
             "预计年化: %s%%\n" +
+            "开仓手续费: %s USDT\n" +
             "当前余额: %s USDT\n" +
             "━━━━━━━━━━━━━━━━",
             time,
@@ -65,6 +66,7 @@ public class FeishuNotifier {
             rate.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP),
             expectedEarning.setScale(4, RoundingMode.HALF_UP),
             annualized.setScale(2, RoundingMode.HALF_UP),
+            fee.setScale(4, RoundingMode.HALF_UP),
             balance.setScale(2, RoundingMode.HALF_UP)
         );
         sendText(text);
@@ -73,7 +75,7 @@ public class FeishuNotifier {
     /**
      * 发送平仓通知
      */
-    public void sendClosePosition(String symbol, BigDecimal fundingEarning, BigDecimal tradingPnl, String reason, BigDecimal balance) {
+    public void sendClosePosition(String symbol, BigDecimal fundingEarning, BigDecimal tradingPnl, String reason, BigDecimal balance, BigDecimal totalFees) {
         if (!enabled) return;
         
         String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
@@ -84,6 +86,7 @@ public class FeishuNotifier {
             "币种: %s\n" +
             "资金费收益: %s USDT\n" +
             "买卖盈亏: %s USDT\n" +
+            "累计手续费: %s USDT\n" +
             "平仓原因: %s\n" +
             "当前余额: %s USDT\n" +
             "━━━━━━━━━━━━━━━━",
@@ -91,6 +94,7 @@ public class FeishuNotifier {
             symbol,
             fundingEarning.setScale(4, RoundingMode.HALF_UP),
             tradingPnl.setScale(4, RoundingMode.HALF_UP),
+            totalFees.setScale(4, RoundingMode.HALF_UP),
             reason,
             balance.setScale(2, RoundingMode.HALF_UP)
         );
