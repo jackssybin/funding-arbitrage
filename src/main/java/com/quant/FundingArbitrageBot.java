@@ -490,6 +490,11 @@ public class FundingArbitrageBot {
             accountBalance = exchangeClient == null ? new BigDecimal("10000") : exchangeClient.getBalance();
         } catch (IOException e) {
             log.warn("⚠️  获取账户余额失败: {}", e.getMessage());
+            return false;
+        }
+        if (accountBalance.compareTo(BigDecimal.ZERO) <= 0) {
+            log.warn("⚠️  账户余额不可用或为0，跳过开仓风控检查: balance={}", accountBalance);
+            return false;
         }
         return riskManager.isExposureAcceptable(positions, newSide, accountBalance);
     }
@@ -1010,6 +1015,14 @@ public class FundingArbitrageBot {
                 }
             }
 
+            BigDecimal closePrice = position.getMarkPrice() != null ? position.getMarkPrice() : position.getEntryPrice();
+            try {
+                closePrice = exchangeClient.getCurrentPrice(symbol);
+                position.updateUnrealizedPnl(closePrice);
+            } catch (Exception e) {
+                log.warn("⚠️  获取 {} 最新价格失败，使用已有浮盈亏计算平仓收益: {}", symbol, e.getMessage());
+            }
+
             // 计算平仓盈亏（浮盈浮亏实现化）
             // ⚠️ 注意：资金费收益已经在每次结算时加到totalPnl中了，这里只加买卖盈亏！
             BigDecimal closePnl = BigDecimal.ZERO;
@@ -1021,7 +1034,8 @@ public class FundingArbitrageBot {
 
             // ✅ 计算平仓手续费
             BigDecimal positionValue = position.getEntryPrice().multiply(position.getPositionSize());
-            BigDecimal closeFee = positionValue.multiply(Config.LIVE_TAKER_FEE_RATE);
+            BigDecimal closePositionValue = closePrice.multiply(alignedQuantity);
+            BigDecimal closeFee = closePositionValue.multiply(Config.LIVE_TAKER_FEE_RATE);
             // ✅ 更新模拟账户余额：加上平仓盈亏，扣除平仓手续费
             //   注意：资金费收益已经在每次结算时加到totalPnl了，这里只加买卖盈亏
             exchangeClient.updateSimulatedBalance(closePnl.subtract(closeFee));

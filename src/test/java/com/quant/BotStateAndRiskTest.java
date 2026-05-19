@@ -5,11 +5,15 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
+import java.io.IOException;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BotStateAndRiskTest {
@@ -68,10 +72,171 @@ class BotStateAndRiskTest {
         assertTrue((Boolean) exposureCheck.invoke(bot, "LONG"));
     }
 
+    @Test
+    void rejectsNewExposureWhenBalanceCannotBeRead() throws Exception {
+        FundingArbitrageBot bot = new FundingArbitrageBot();
+        setField(bot, "exchangeClient", new FakeExchangeClient(true, new BigDecimal("10000"), new BigDecimal("100")));
+
+        Method exposureCheck = FundingArbitrageBot.class.getDeclaredMethod("isExposureAcceptable", String.class);
+        exposureCheck.setAccessible(true);
+
+        assertFalse((Boolean) exposureCheck.invoke(bot, "LONG"));
+    }
+
+    @Test
+    void closePositionRefreshesPnlAndCloseFeeWithLatestPrice() throws Exception {
+        FundingArbitrageBot bot = new FundingArbitrageBot();
+        FakeExchangeClient client = new FakeExchangeClient(false, new BigDecimal("10000"), new BigDecimal("110"));
+        setField(bot, "exchangeClient", client);
+        setField(bot, "precision", new ExchangePrecision(null));
+        setField(bot, "txManager", new AtomicTransactionManager(client, new ClosingSmartOrderExecutor(client)));
+        setField(bot, "feishuNotifier", new FeishuNotifier());
+        setField(bot, "dailyReporter", new DailyReporter());
+
+        Map<String, Position> positions = positionsOf(bot);
+        Position position = new Position("BTCUSDT");
+        position.restore(BigDecimal.ONE, new BigDecimal("100"), new BigDecimal("-0.0010"),
+                "LONG", LocalDateTime.now().minusHours(8), 0, BigDecimal.ZERO);
+        positions.put("BTCUSDT", position);
+
+        Method close = FundingArbitrageBot.class.getDeclaredMethod("closePosition", String.class, String.class);
+        close.setAccessible(true);
+        close.invoke(bot, "BTCUSDT", "test-close");
+
+        assertEquals(0, client.balanceDelta.compareTo(new BigDecimal("9.945000000")));
+    }
+
     @SuppressWarnings("unchecked")
     private Map<String, Position> positionsOf(FundingArbitrageBot bot) throws Exception {
         Field field = FundingArbitrageBot.class.getDeclaredField("positions");
         field.setAccessible(true);
         return (Map<String, Position>) field.get(bot);
+    }
+
+    private void setField(FundingArbitrageBot bot, String name, Object value) throws Exception {
+        Field field = FundingArbitrageBot.class.getDeclaredField(name);
+        field.setAccessible(true);
+        field.set(bot, value);
+    }
+
+    private static class ClosingSmartOrderExecutor extends SmartOrderExecutor {
+        ClosingSmartOrderExecutor(ExchangeClient client) {
+            super(client, null);
+        }
+
+        @Override
+        public String smartCloseLong(String symbol, BigDecimal totalQuantity) {
+            return "close-long";
+        }
+
+        @Override
+        public String smartCloseShort(String symbol, BigDecimal totalQuantity) {
+            return "close-short";
+        }
+    }
+
+    private static class FakeExchangeClient implements ExchangeClient {
+        final boolean failBalance;
+        final BigDecimal balance;
+        final BigDecimal currentPrice;
+        BigDecimal balanceDelta = BigDecimal.ZERO;
+
+        FakeExchangeClient(boolean failBalance, BigDecimal balance, BigDecimal currentPrice) {
+            this.failBalance = failBalance;
+            this.balance = balance;
+            this.currentPrice = currentPrice;
+        }
+
+        @Override
+        public Map<String, BigDecimal> getAllFundingRates(List<String> symbols) {
+            return Collections.emptyMap();
+        }
+
+        @Override
+        public BigDecimal getFundingRate(String symbol) {
+            return BigDecimal.ZERO;
+        }
+
+        @Override
+        public BigDecimal getCurrentPrice(String symbol) {
+            return currentPrice;
+        }
+
+        @Override
+        public BigDecimal get24hChange(String symbol) {
+            return BigDecimal.ZERO;
+        }
+
+        @Override
+        public BigDecimal getCurrentPosition(String symbol) {
+            return BigDecimal.ZERO;
+        }
+
+        @Override
+        public void setLeverage(String symbol, int leverage) {
+        }
+
+        @Override
+        public String openShort(String symbol, BigDecimal quantity) {
+            return "open-short";
+        }
+
+        @Override
+        public String openLong(String symbol, BigDecimal quantity) {
+            return "open-long";
+        }
+
+        @Override
+        public String closeShort(String symbol, BigDecimal quantity) {
+            return "close-short";
+        }
+
+        @Override
+        public String closeLong(String symbol, BigDecimal quantity) {
+            return "close-long";
+        }
+
+        @Override
+        public BigDecimal getPositionAmount(String symbol) {
+            return BigDecimal.ZERO;
+        }
+
+        @Override
+        public BigDecimal getBalance() throws IOException {
+            if (failBalance) {
+                throw new IOException("balance unavailable");
+            }
+            return balance;
+        }
+
+        @Override
+        public void updateSimulatedBalance(BigDecimal delta) {
+            balanceDelta = balanceDelta.add(delta);
+        }
+
+        @Override
+        public BigDecimal getSimulatedBalance() {
+            return balance.add(balanceDelta);
+        }
+
+        @Override
+        public String buySpot(String symbol, BigDecimal quantity) {
+            return "buy-spot";
+        }
+
+        @Override
+        public String sellSpot(String symbol, BigDecimal quantity) {
+            return "sell-spot";
+        }
+
+        @Override
+        public boolean testConnection() {
+            return true;
+        }
+
+        @Override
+        public String getExchangeName() {
+            return "fake";
+        }
     }
 }
