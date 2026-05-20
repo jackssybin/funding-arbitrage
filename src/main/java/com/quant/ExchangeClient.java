@@ -88,7 +88,9 @@ public interface ExchangeClient {
     // ===== 现货操作 =====
 
     /** 获取现货账户可用余额 (USDT) */
-    BigDecimal getSpotBalance() throws IOException;
+    default BigDecimal getSpotBalance() throws IOException {
+        throw new IOException("Spot balance API is not implemented by " + getExchangeName());
+    }
 
     /** 现货买入 */
     String buySpot(String symbol, BigDecimal quantity) throws IOException;

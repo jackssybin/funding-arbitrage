@@ -402,15 +402,30 @@ public class FundingArbitrageBot {
                 LocalDateTime entryTime = ps.entryTime == null || ps.entryTime.isEmpty()
                         ? LocalDateTime.now()
                         : LocalDateTime.parse(ps.entryTime, dtf);
-                position.restore(
-                        BigDecimal.valueOf(ps.positionSize),
-                        BigDecimal.valueOf(ps.entryPrice),
-                        BigDecimal.valueOf(ps.lastFundingRate),
-                        ps.positionSide,
-                        entryTime,
-                        ps.fundingCount,
-                        BigDecimal.valueOf(ps.totalFundingEarned)
-                );
+                if (ps.hedged) {
+                    position.restoreWithHedge(
+                            BigDecimal.valueOf(ps.positionSize),
+                            BigDecimal.valueOf(ps.entryPrice),
+                            BigDecimal.valueOf(ps.spotPositionSize),
+                            BigDecimal.valueOf(ps.spotEntryPrice),
+                            BigDecimal.valueOf(ps.lastFundingRate),
+                            ps.positionSide,
+                            entryTime,
+                            ps.fundingCount,
+                            BigDecimal.valueOf(ps.totalFundingEarned),
+                            BigDecimal.valueOf(ps.hedgeRatio)
+                    );
+                } else {
+                    position.restore(
+                            BigDecimal.valueOf(ps.positionSize),
+                            BigDecimal.valueOf(ps.entryPrice),
+                            BigDecimal.valueOf(ps.lastFundingRate),
+                            ps.positionSide,
+                            entryTime,
+                            ps.fundingCount,
+                            BigDecimal.valueOf(ps.totalFundingEarned)
+                    );
+                }
                 restored++;
             } catch (Exception e) {
                 log.error("恢复 {} 持仓状态失败: {}", ps.symbol, e.getMessage());
@@ -473,16 +488,18 @@ public class FundingArbitrageBot {
         BigDecimal expectedFunding = expectedFundingForConfiguredSettlements(fundingRate);
         BigDecimal roundTripFee = estimatedRoundTripFee();
         BigDecimal roundTripSlippage = estimatedRoundTripSlippage();
+        BigDecimal spotRoundTripCost = estimatedSpotRoundTripCost(fundingRate);
         BigDecimal costDeviationBuffer = historicalCostDeviationBuffer(symbol);
         BigDecimal expectedNet = expectedNetFundingAfterCosts(fundingRate).subtract(costDeviationBuffer);
 
         if (expectedNet.compareTo(Config.LIVE_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS) < 0) {
-            log.info("{} 跳过开仓：预计资金费({}次结算) {} USDT，往返手续费 {} USDT，往返滑点 {} USDT，历史成本偏差缓冲 {} USDT，净收益 {} USDT，低于最低要求 {} USDT",
+            log.info("{} 跳过开仓：预计资金费({}次结算) {} USDT，合约往返手续费 {} USDT，合约往返滑点 {} USDT，现货对冲往返成本 {} USDT，历史成本偏差缓冲 {} USDT，净收益 {} USDT，低于最低要求 {} USDT",
                     symbol,
                     Config.LIVE_EXPECTED_FUNDING_SETTLEMENTS,
                     expectedFunding.setScale(4, RoundingMode.HALF_UP),
                     roundTripFee.setScale(4, RoundingMode.HALF_UP),
                     roundTripSlippage.setScale(4, RoundingMode.HALF_UP),
+                    spotRoundTripCost.setScale(4, RoundingMode.HALF_UP),
                     costDeviationBuffer.setScale(4, RoundingMode.HALF_UP),
                     expectedNet.setScale(4, RoundingMode.HALF_UP),
                     Config.LIVE_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS.setScale(4, RoundingMode.HALF_UP));
@@ -517,10 +534,21 @@ public class FundingArbitrageBot {
                 .multiply(new BigDecimal("2"));
     }
 
+    private BigDecimal estimatedSpotRoundTripCost(BigDecimal fundingRate) {
+        if (!Config.SPOT_HEDGE_ENABLED || fundingRate.compareTo(BigDecimal.ZERO) <= 0) {
+            return BigDecimal.ZERO;
+        }
+        BigDecimal spotNotional = Config.POSITION_VALUE_USDT.multiply(Config.SPOT_HEDGE_RATIO);
+        return spotNotional
+                .multiply(Config.SPOT_TAKER_FEE_RATE.add(Config.SPOT_SLIPPAGE_RATE))
+                .multiply(new BigDecimal("2"));
+    }
+
     private BigDecimal expectedNetFundingAfterCosts(BigDecimal fundingRate) {
         return expectedFundingForConfiguredSettlements(fundingRate)
                 .subtract(estimatedRoundTripFee())
-                .subtract(estimatedRoundTripSlippage());
+                .subtract(estimatedRoundTripSlippage())
+                .subtract(estimatedSpotRoundTripCost(fundingRate));
     }
 
     private BigDecimal historicalCostDeviationBuffer(String symbol) {
@@ -624,8 +652,8 @@ public class FundingArbitrageBot {
             }
             return sufficient;
         } catch (Exception e) {
-            log.warn("⚠️  获取现货余额失败，假定资金充足: {}", e.getMessage());
-            return true;
+            log.warn("⚠️  获取现货余额失败，暂停现货对冲开仓: {}", e.getMessage());
+            return false;
         }
     }
 
@@ -1110,6 +1138,7 @@ public class FundingArbitrageBot {
             BigDecimal executedNotional = executionNotionalOrFallback(execution, executionPrice, executedQuantity);
 
             Position position = positions.get(symbol);
+            BigDecimal spotOpenCost = BigDecimal.ZERO;
             if (useHedge) {
                 // ========== 现货对冲模式：开合约同时买现货 ==========
                 log.info("🔄 启用现货对冲模式，对冲比例: {}%", 
@@ -1127,6 +1156,8 @@ public class FundingArbitrageBot {
                         
                         // 获取现货成交价格（简化：使用当前价格）
                         BigDecimal spotExecutionPrice = currentPrice;
+                        BigDecimal spotOpenNotional = spotExecutionPrice.multiply(spotAlignedQuantity);
+                        spotOpenCost = estimatedSpotOneWayCost(spotOpenNotional);
                         
                         // 记录带现货对冲的持仓
                         position.openWithHedge(executedQuantity, executionPrice, 
@@ -1155,6 +1186,7 @@ public class FundingArbitrageBot {
             // ✅ 计算开仓手续费（双边：开仓）
             BigDecimal positionValue = executedNotional;
             BigDecimal openFee = executionFeeOrFallback(execution, positionValue);
+            BigDecimal totalOpenCost = openFee.add(spotOpenCost);
             recordExecutionCost(
                     "OPEN",
                     symbol,
@@ -1170,7 +1202,7 @@ public class FundingArbitrageBot {
                     currentPrice,
                     execution);
             // ✅ 更新模拟账户余额：扣除开仓手续费
-            exchangeClient.updateSimulatedBalance(openFee.negate());
+            exchangeClient.updateSimulatedBalance(totalOpenCost.negate());
 
             BigDecimal annualized = fundingRate.abs()
                     .multiply(new BigDecimal("1095"))  // 3年=1095次资金费结算
@@ -1182,17 +1214,17 @@ public class FundingArbitrageBot {
             try {
                 BigDecimal openBalance = exchangeClient.getBalance();
                 log.info("");
-                log.info("🎉 开仓完成！ {} {} ({}), 成交均价 {}, 预计年化 {}%, 手续费 {} USDT", symbol, sideName, executedQuantity, executionPrice.setScale(8, RoundingMode.HALF_UP), annualized, openFee.setScale(4, RoundingMode.HALF_UP));
+                log.info("🎉 开仓完成！ {} {} ({}), 成交均价 {}, 预计年化 {}%, 总开仓成本 {} USDT", symbol, sideName, executedQuantity, executionPrice.setScale(8, RoundingMode.HALF_UP), annualized, totalOpenCost.setScale(4, RoundingMode.HALF_UP));
                 log.info("");
                 // 飞书推送：开仓通知
-                feishuNotifier.sendOpenPosition(symbol, sideName, executedQuantity, fundingRate, annualized, openBalance, expectedEarningOpen, openFee);
+                feishuNotifier.sendOpenPosition(symbol, sideName, executedQuantity, fundingRate, annualized, openBalance, expectedEarningOpen, totalOpenCost);
             } catch (IOException e) {
                 log.warn("⚠️  获取余额失败，飞书通知将不带余额信息: {}", e.getMessage());
                 log.info("");
-                log.info("🎉 开仓完成！ {} {} ({}), 成交均价 {}, 预计年化 {}%, 手续费 {} USDT", symbol, sideName, executedQuantity, executionPrice.setScale(8, RoundingMode.HALF_UP), annualized, openFee.setScale(4, RoundingMode.HALF_UP));
+                log.info("🎉 开仓完成！ {} {} ({}), 成交均价 {}, 预计年化 {}%, 总开仓成本 {} USDT", symbol, sideName, executedQuantity, executionPrice.setScale(8, RoundingMode.HALF_UP), annualized, totalOpenCost.setScale(4, RoundingMode.HALF_UP));
                 log.info("");
                 // 飞书推送：开仓通知
-                feishuNotifier.sendOpenPosition(symbol, sideName, executedQuantity, fundingRate, annualized, BigDecimal.ZERO, expectedEarningOpen, openFee);
+                feishuNotifier.sendOpenPosition(symbol, sideName, executedQuantity, fundingRate, annualized, BigDecimal.ZERO, expectedEarningOpen, totalOpenCost);
             }
 
         } catch (Exception e) {
@@ -1242,6 +1274,13 @@ public class FundingArbitrageBot {
         return notional.multiply(Config.LIVE_SLIPPAGE_RATE);
     }
 
+    private BigDecimal estimatedSpotOneWayCost(BigDecimal spotNotional) {
+        if (spotNotional == null || spotNotional.compareTo(BigDecimal.ZERO) <= 0) {
+            return BigDecimal.ZERO;
+        }
+        return spotNotional.multiply(Config.SPOT_TAKER_FEE_RATE.add(Config.SPOT_SLIPPAGE_RATE));
+    }
+
     private BigDecimal executionSlippageCost(BigDecimal estimatedPrice, BigDecimal executionPrice,
                                              BigDecimal quantity) {
         if (estimatedPrice == null || executionPrice == null || quantity == null) {
@@ -1280,6 +1319,18 @@ public class FundingArbitrageBot {
                 executionPrice, estimatedPrice, estimated);
     }
 
+    private boolean canBypassMinHoldingTime(String reason) {
+        if (reason == null) {
+            return false;
+        }
+        return reason.contains("止损")
+                || reason.contains("移仓")
+                || reason.contains("费率降低")
+                || reason.contains("对冲")
+                || reason.contains("异常")
+                || reason.contains("风控");
+    }
+
     private void closePosition(String symbol, String reason) {
         Position position = positions.get(symbol);
         if (!position.hasPosition()) return;
@@ -1292,7 +1343,7 @@ public class FundingArbitrageBot {
 
         // ========== 最低持仓时间检查 ==========
         long holdingHours = position.getHoldingHours();
-        if (holdingHours < Config.MIN_HOLDING_HOURS && !reason.contains("止损") && !reason.contains("止损")) {
+        if (holdingHours < Config.MIN_HOLDING_HOURS && !canBypassMinHoldingTime(reason)) {
             log.info("⏰ 持仓时间{}小时不足{}小时（最低持仓要求），除非止损否则不平仓", 
                     holdingHours, Config.MIN_HOLDING_HOURS);
             log.info("   平仓原因: {}", reason);
@@ -1304,20 +1355,7 @@ public class FundingArbitrageBot {
 
             String side = position.getPositionSide();
 
-            // ========== 先平现货（如果有对冲） ==========
-            if (isHedged && position.getSpotPositionSize().compareTo(BigDecimal.ZERO) > 0) {
-                try {
-                    BigDecimal spotQuantity = position.getSpotPositionSize();
-                    BigDecimal spotAlignedQuantity = precision.alignSpotQuantity(symbol, spotQuantity);
-                    log.info("📉 现货卖出平仓: {} {}", spotAlignedQuantity, symbol);
-                    exchangeClient.closeSpotPosition(symbol, spotAlignedQuantity);
-                    log.info("✅ 现货平仓成功");
-                } catch (Exception e) {
-                    log.error("❌ 现货平仓失败，需要手动处理: {}", e.getMessage());
-                }
-            }
-
-            // ========== 平合约 ==========
+            // ========== 先平合约，避免先卖出现货后留下裸合约风险 ==========
             AtomicTransactionManager.TxResult result = txManager.atomicClosePosition(symbol, alignedQuantity, side);
             if (!result.isSuccess()) {
                 try {
@@ -1350,17 +1388,29 @@ public class FundingArbitrageBot {
             BigDecimal executedNotional = executionNotionalOrFallback(execution, closePrice, executedQuantity);
             position.updateUnrealizedPnl(closePrice);
 
+            BigDecimal spotPnl = BigDecimal.ZERO;
+            BigDecimal spotCloseCost = BigDecimal.ZERO;
+            if (isHedged && position.getSpotPositionSize().compareTo(BigDecimal.ZERO) > 0) {
+                BigDecimal spotAlignedQuantity = precision.alignSpotQuantity(symbol, position.getSpotPositionSize());
+                spotPnl = position.getSpotPnl(closePrice);
+                spotCloseCost = estimatedSpotOneWayCost(closePrice.multiply(spotAlignedQuantity));
+                log.info("📉 现货卖出平仓: {} {}", spotAlignedQuantity, symbol);
+                exchangeClient.closeSpotPosition(symbol, spotAlignedQuantity);
+                log.info("✅ 现货平仓成功");
+            }
+
             BigDecimal closePnl = BigDecimal.ZERO;
             if (position.getUnrealizedPnl() != null) {
                 closePnl = position.getUnrealizedPnl();
             }
             // 只计算买卖盈亏（资金费已经在结算时统计过了）
-            BigDecimal totalReturn = closePnl;
+            BigDecimal totalReturn = closePnl.add(spotPnl);
 
             // ✅ 计算平仓手续费
             BigDecimal positionValue = position.getEntryPrice().multiply(position.getPositionSize());
             BigDecimal closePositionValue = executedNotional;
             BigDecimal closeFee = executionFeeOrFallback(execution, closePositionValue);
+            BigDecimal totalCloseCost = closeFee.add(spotCloseCost);
             recordExecutionCost(
                     "CLOSE",
                     symbol,
@@ -1377,7 +1427,7 @@ public class FundingArbitrageBot {
                     execution);
             // ✅ 更新模拟账户余额：加上平仓盈亏，扣除平仓手续费
             //   注意：资金费收益已经在每次结算时加到totalPnl了，这里只加买卖盈亏
-            exchangeClient.updateSimulatedBalance(closePnl.subtract(closeFee));
+            exchangeClient.updateSimulatedBalance(totalReturn.subtract(totalCloseCost));
 
             // 动态止损相关信息
             BigDecimal safetyBuffer = position.getSafetyBuffer();
@@ -1385,9 +1435,9 @@ public class FundingArbitrageBot {
             
             log.info("💵 平仓结算: 资金费收益{} USDT(已累计), 本次买卖盈亏{} USDT, 开仓手续费{} USDT, 平仓手续费{} USDT (持仓{}小时, {}次结算, 安全垫{} USDT, 保本:{})",
                     position.getTotalFundingEarned().setScale(4, RoundingMode.HALF_UP),
-                    closePnl.setScale(4, RoundingMode.HALF_UP),
+                    totalReturn.setScale(4, RoundingMode.HALF_UP),
                     positionValue.multiply(Config.LIVE_TAKER_FEE_RATE).setScale(4, RoundingMode.HALF_UP),
-                    closeFee.setScale(4, RoundingMode.HALF_UP),
+                    totalCloseCost.setScale(4, RoundingMode.HALF_UP),
                     position.getHoldingHours(),
                     position.getFundingCount(),
                     safetyBuffer.setScale(4, RoundingMode.HALF_UP),
@@ -1398,9 +1448,9 @@ public class FundingArbitrageBot {
             recordClosePnl(totalReturn);
 
             // 平仓前先保存用于日报的数据（因为 position.close() 会清空状态）
-            BigDecimal finalPnl = closePnl;
+            BigDecimal finalPnl = totalReturn;
             BigDecimal totalFundingEarned = position.getTotalFundingEarned();
-            BigDecimal totalFees = positionValue.multiply(Config.LIVE_TAKER_FEE_RATE).add(closeFee);
+            BigDecimal totalFees = positionValue.multiply(Config.LIVE_TAKER_FEE_RATE).add(totalCloseCost);
             
             // ✅ 如果是止损平仓，记录止损时间（用于冷却期）
             if (reason.contains("止损")) {

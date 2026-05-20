@@ -33,6 +33,7 @@ public class BinanceFuturesClient implements ExchangeClient {
     private final String apiKey;
     private final String secretKey;
     private final String baseUrl;
+    private final String spotBaseUrl;
 
     // 模拟模式余额维护（解决余额永远10000的BUG）
     private BigDecimal simulatedBalance = new BigDecimal("10000");
@@ -56,6 +57,7 @@ public class BinanceFuturesClient implements ExchangeClient {
         this.apiKey = apiKey;
         this.secretKey = secretKey;
         this.baseUrl = Config.BINANCE_FUTURES_API;
+        this.spotBaseUrl = Config.BINANCE_SPOT_API;
     }
 
     @Override
@@ -759,9 +761,36 @@ public class BinanceFuturesClient implements ExchangeClient {
             // 模拟模式：返回合约余额的80%作为现货余额
             return getBalance().multiply(new BigDecimal("0.8"));
         }
-        // TODO: 实现 Binance 现货余额查询
-        log.warn("⚠️  Binance 现货余额查询待实现，使用模拟余额");
-        return getBalance().multiply(new BigDecimal("0.8"));
+        long timestamp = System.currentTimeMillis();
+        String params = "timestamp=" + timestamp;
+        String signature = sign(params);
+        String url = spotBaseUrl + "/api/v3/account?" + params + "&signature=" + signature;
+
+        Request request = new Request.Builder()
+                .url(url)
+                .header("X-MBX-APIKEY", apiKey)
+                .get()
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            String responseBody = response.body().string();
+            if (!response.isSuccessful()) {
+                throw new IOException("Binance spot balance request failed: " + response.code() + " " + responseBody);
+            }
+
+            JsonNode json = mapper.readTree(responseBody);
+            JsonNode balances = json.get("balances");
+            if (balances != null) {
+                for (JsonNode balance : balances) {
+                    if ("USDT".equals(balance.path("asset").asText())) {
+                        BigDecimal free = readDecimal(balance, "free", "0");
+                        log.info("💰 Binance 现货账户可用余额: {} USDT", free.setScale(2, RoundingMode.HALF_UP));
+                        return free;
+                    }
+                }
+            }
+            return BigDecimal.ZERO;
+        }
     }
 
     /**
@@ -773,9 +802,7 @@ public class BinanceFuturesClient implements ExchangeClient {
             log.info("[模拟模式] Binance 现货买入 {} 数量 {}", symbol, quantity);
             return "BINANCE_SIM_SPOT_BUY_" + System.currentTimeMillis();
         }
-        // TODO: 实现 Binance 现货买入
-        log.warn("⚠️  Binance 现货买入待实现，模拟成功");
-        return "BINANCE_SPOT_BUY_" + System.currentTimeMillis();
+        return executeSpotMarketOrder(symbol, "BUY", quantity);
     }
     
     /**
@@ -787,9 +814,80 @@ public class BinanceFuturesClient implements ExchangeClient {
             log.info("[模拟模式] Binance 现货卖出 {} 数量 {}", symbol, quantity);
             return "BINANCE_SIM_SPOT_SELL_" + System.currentTimeMillis();
         }
-        // TODO: 实现 Binance 现货卖出
-        log.warn("⚠️  Binance 现货卖出现货卖出待实现，模拟成功");
-        return "BINANCE_SPOT_SELL_" + System.currentTimeMillis();
+        return executeSpotMarketOrder(symbol, "SELL", quantity);
+    }
+
+    private String executeSpotMarketOrder(String symbol, String side, BigDecimal quantity) throws IOException {
+        if (quantity == null || quantity.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new IOException("Binance spot " + side + " quantity must be positive: " + quantity);
+        }
+
+        long timestamp = System.currentTimeMillis();
+        String params = "symbol=" + symbol
+                + "&side=" + side
+                + "&type=MARKET"
+                + "&quantity=" + quantity.toPlainString()
+                + "&newOrderRespType=FULL"
+                + "&timestamp=" + timestamp;
+        String signature = sign(params);
+        String url = spotBaseUrl + "/api/v3/order?" + params + "&signature=" + signature;
+
+        RequestBody body = RequestBody.create("", MediaType.parse("application/json"));
+        Request request = new Request.Builder()
+                .url(url)
+                .header("X-MBX-APIKEY", apiKey)
+                .post(body)
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            String responseBody = response.body().string();
+            if (!response.isSuccessful()) {
+                throw new IOException("Binance spot " + side + " failed: " + response.code() + " " + responseBody);
+            }
+
+            String orderId = mapper.readTree(responseBody).path("orderId").asText();
+            TradeExecutionReport report = parseSpotOrderExecution(symbol, orderId, responseBody);
+            log.info("✅ Binance 现货{}成功 - 订单ID: {}, 成交数量: {}, 成交均价: {}, 手续费: {} {}",
+                    "BUY".equals(side) ? "买入" : "卖出",
+                    orderId,
+                    report.getExecutedQuantity().setScale(8, RoundingMode.HALF_UP),
+                    report.getAveragePrice().setScale(8, RoundingMode.HALF_UP),
+                    report.getFee().setScale(8, RoundingMode.HALF_UP),
+                    report.getFeeAsset());
+            return orderId;
+        }
+    }
+
+    static TradeExecutionReport parseSpotOrderExecution(String symbol, String orderId, String responseBody)
+            throws IOException {
+        JsonNode json = mapper.readTree(responseBody);
+        String resolvedOrderId = orderId == null || orderId.isEmpty()
+                ? json.path("orderId").asText()
+                : orderId;
+        TradeExecutionReport report = new TradeExecutionReport(symbol, resolvedOrderId);
+
+        JsonNode fills = json.get("fills");
+        if (fills != null && fills.isArray() && fills.size() > 0) {
+            for (JsonNode fill : fills) {
+                report.addFill(
+                        readDecimal(fill, "price", "0"),
+                        readDecimal(fill, "qty", "0"),
+                        readDecimal(fill, "commission", "0"),
+                        fill.hasNonNull("commissionAsset") ? fill.get("commissionAsset").asText() : "USDT",
+                        BigDecimal.ZERO,
+                        fill.hasNonNull("tradeId") ? fill.get("tradeId").asText() : null
+                );
+            }
+            return report;
+        }
+
+        BigDecimal executedQty = readDecimal(json, "executedQty", "0");
+        BigDecimal quoteQty = readDecimal(json, "cummulativeQuoteQty", "0");
+        if (executedQty.compareTo(BigDecimal.ZERO) > 0 && quoteQty.compareTo(BigDecimal.ZERO) > 0) {
+            BigDecimal avgPrice = quoteQty.divide(executedQty, 12, RoundingMode.HALF_UP);
+            report.addFill(avgPrice, executedQty, BigDecimal.ZERO, "USDT", BigDecimal.ZERO, resolvedOrderId);
+        }
+        return report;
     }
 
     // ==================== 内部访问器 ====================

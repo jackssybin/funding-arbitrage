@@ -49,6 +49,40 @@ class BotStateAndRiskTest {
     }
 
     @Test
+    void restoresPersistedHedgedPositionState() throws Exception {
+        FundingArbitrageBot bot = new FundingArbitrageBot();
+        Map<String, Position> positions = positionsOf(bot);
+        positions.put("BTCUSDT", new Position("BTCUSDT"));
+
+        StrategyPersistence.StrategyState state = new StrategyPersistence.StrategyState();
+        StrategyPersistence.PositionState ps = new StrategyPersistence.PositionState();
+        ps.symbol = "BTCUSDT";
+        ps.positionSide = "SHORT";
+        ps.positionSize = 2.0;
+        ps.entryPrice = 50000.0;
+        ps.lastFundingRate = 0.001;
+        ps.entryTime = LocalDateTime.now().minusHours(9).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        ps.fundingCount = 3;
+        ps.totalFundingEarned = 42.5;
+        ps.hedged = true;
+        ps.spotPositionSize = 1.5;
+        ps.spotEntryPrice = 49900.0;
+        ps.hedgeRatio = 0.75;
+        state.positions.add(ps);
+
+        Method restore = FundingArbitrageBot.class.getDeclaredMethod("restorePositions", StrategyPersistence.StrategyState.class);
+        restore.setAccessible(true);
+        restore.invoke(bot, state);
+
+        Position restored = positions.get("BTCUSDT");
+        assertTrue(restored.hasPosition());
+        assertTrue(restored.isHedged());
+        assertEquals(0, restored.getSpotPositionSize().compareTo(new BigDecimal("1.5")));
+        assertEquals(0, restored.getSpotEntryPrice().compareTo(new BigDecimal("49900.0")));
+        assertEquals(0, restored.getHedgeRatio().compareTo(new BigDecimal("0.75")));
+    }
+
+    @Test
     void acceptsOppositeSideWhenItReducesNetExposure() throws Exception {
         FundingArbitrageBot bot = new FundingArbitrageBot();
         Map<String, Position> positions = positionsOf(bot);

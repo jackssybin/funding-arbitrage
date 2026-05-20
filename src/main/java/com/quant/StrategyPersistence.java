@@ -125,6 +125,10 @@ public class StrategyPersistence {
                     ps.entryTime = pos.getEntryTime().format(dtf);
                     ps.fundingCount = pos.getFundingCount();
                     ps.totalFundingEarned = pos.getTotalFundingEarned().doubleValue();
+                    ps.hedged = pos.isHedged();
+                    ps.spotPositionSize = pos.getSpotPositionSize().doubleValue();
+                    ps.spotEntryPrice = pos.getSpotEntryPrice().doubleValue();
+                    ps.hedgeRatio = pos.getHedgeRatio().doubleValue();
                     state.positions.add(ps);
                 }
             }
@@ -370,6 +374,10 @@ public class StrategyPersistence {
         public String entryTime;
         public int fundingCount;
         public double totalFundingEarned;
+        public boolean hedged;
+        public double spotPositionSize;
+        public double spotEntryPrice;
+        public double hedgeRatio;
     }
 
     public static class DailyStats {

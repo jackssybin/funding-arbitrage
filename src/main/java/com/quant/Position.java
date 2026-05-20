@@ -105,6 +105,22 @@ public class Position {
         this.fundingCount = fundingCount;
         this.totalFundingEarned = totalFundingEarned == null ? BigDecimal.ZERO : totalFundingEarned;
         this.gridOrders.clear();
+        this.hedged = false;
+        this.spotPositionSize = BigDecimal.ZERO;
+        this.spotEntryPrice = BigDecimal.ZERO;
+        this.hedgeRatio = BigDecimal.ZERO;
+    }
+
+    public void restoreWithHedge(BigDecimal contractSize, BigDecimal contractPrice,
+                                 BigDecimal spotSize, BigDecimal spotPrice,
+                                 BigDecimal fundingRate, String side, LocalDateTime entryTime,
+                                 int fundingCount, BigDecimal totalFundingEarned,
+                                 BigDecimal hedgeRatio) {
+        restore(contractSize, contractPrice, fundingRate, side, entryTime, fundingCount, totalFundingEarned);
+        this.hedged = true;
+        this.spotPositionSize = spotSize == null ? BigDecimal.ZERO : spotSize;
+        this.spotEntryPrice = spotPrice == null ? BigDecimal.ZERO : spotPrice;
+        this.hedgeRatio = hedgeRatio == null ? BigDecimal.ZERO : hedgeRatio;
     }
 
     /**
