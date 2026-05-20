@@ -15,7 +15,7 @@ public class Position {
     private String symbol;                  // 交易对
     private boolean hasPosition;            // 是否持仓
     private String positionSide;            // 持仓方向：LONG=做多, SHORT=做空
-    private BigDecimal positionSize;        // 持仓数量
+    private BigDecimal positionSize;        // 合约持仓数量
     private BigDecimal entryPrice;          // 开仓均价
     private BigDecimal lastFundingRate;     // 持仓时的资金费率
     private LocalDateTime entryTime;        // 开仓时间
@@ -28,6 +28,12 @@ public class Position {
     private BigDecimal gridProfit;          // 网格收益
     private List<GridOrder> gridOrders;     // 网格订单列表
     private LocalDateTime lastStopLossTime; // 最后止损时间（冷却期用）
+
+    // ========== 现货对冲相关字段 ==========
+    private boolean hedged;                 // 是否启用现货对冲
+    private BigDecimal spotPositionSize;    // 现货持仓数量
+    private BigDecimal spotEntryPrice;      // 现货开仓均价
+    private BigDecimal hedgeRatio;          // 对冲比例
     private java.util.LinkedList<BigDecimal> rateHistory = new java.util.LinkedList<>(); // 费率历史（用于稳定检查）
 
     public Position(String symbol) {
@@ -39,10 +45,14 @@ public class Position {
         this.totalFundingEarned = BigDecimal.ZERO;
         this.gridProfit = BigDecimal.ZERO;
         this.gridOrders = new ArrayList<>();
+        this.hedged = false;
+        this.spotPositionSize = BigDecimal.ZERO;
+        this.spotEntryPrice = BigDecimal.ZERO;
+        this.hedgeRatio = BigDecimal.ZERO;
     }
 
     /**
-     * 开仓
+     * 开仓（纯合约模式）
      */
     public void open(BigDecimal size, BigDecimal price, BigDecimal fundingRate, String side) {
         this.hasPosition = true;
@@ -54,6 +64,31 @@ public class Position {
         this.fundingCount = 0;
         this.totalFundingEarned = BigDecimal.ZERO;
         this.gridOrders.clear();
+        this.hedged = false;
+        this.spotPositionSize = BigDecimal.ZERO;
+        this.spotEntryPrice = BigDecimal.ZERO;
+        this.hedgeRatio = BigDecimal.ZERO;
+    }
+
+    /**
+     * 开仓（带现货对冲）
+     */
+    public void openWithHedge(BigDecimal contractSize, BigDecimal contractPrice, 
+                              BigDecimal spotSize, BigDecimal spotPrice,
+                              BigDecimal fundingRate, String side, BigDecimal hedgeRatio) {
+        this.hasPosition = true;
+        this.positionSize = contractSize;
+        this.entryPrice = contractPrice;
+        this.spotPositionSize = spotSize;
+        this.spotEntryPrice = spotPrice;
+        this.lastFundingRate = fundingRate;
+        this.positionSide = side;
+        this.entryTime = LocalDateTime.now();
+        this.fundingCount = 0;
+        this.totalFundingEarned = BigDecimal.ZERO;
+        this.gridOrders.clear();
+        this.hedged = true;
+        this.hedgeRatio = hedgeRatio;
     }
 
     /**
@@ -222,12 +257,104 @@ public class Position {
     }
 
     /**
-     * 平仓
+     * 平仓（同时平现货）
      */
     public void close() {
         this.hasPosition = false;
         this.positionSize = BigDecimal.ZERO;
+        this.spotPositionSize = BigDecimal.ZERO;
+        this.hedged = false;
         this.gridOrders.clear();
+    }
+
+    // ========== 现货对冲相关方法 ==========
+    public boolean isHedged() {
+        return hedged;
+    }
+
+    public BigDecimal getSpotPositionSize() {
+        return spotPositionSize;
+    }
+
+    public BigDecimal getSpotEntryPrice() {
+        return spotEntryPrice;
+    }
+
+    public BigDecimal getHedgeRatio() {
+        return hedgeRatio;
+    }
+
+    /**
+     * 获取现货持仓的名义价值
+     */
+    public BigDecimal getSpotNotionalValue(BigDecimal currentPrice) {
+        if (spotPositionSize == null || spotPositionSize.compareTo(BigDecimal.ZERO) <= 0) {
+            return BigDecimal.ZERO;
+        }
+        return spotPositionSize.multiply(currentPrice);
+    }
+
+    /**
+     * 获取合约持仓的名义价值
+     */
+    public BigDecimal getContractNotionalValue(BigDecimal currentPrice) {
+        if (positionSize == null || positionSize.compareTo(BigDecimal.ZERO) <= 0) {
+            return BigDecimal.ZERO;
+        }
+        return positionSize.multiply(currentPrice);
+    }
+
+    /**
+     * 计算现货持仓盈亏
+     */
+    public BigDecimal getSpotPnl(BigDecimal currentPrice) {
+        if (!hedged || spotPositionSize.compareTo(BigDecimal.ZERO) <= 0) {
+            return BigDecimal.ZERO;
+        }
+        BigDecimal priceReturn = currentPrice.subtract(spotEntryPrice)
+                .divide(spotEntryPrice, 8, RoundingMode.HALF_UP);
+        return getSpotNotionalValue(spotEntryPrice).multiply(priceReturn);
+    }
+
+    /**
+     * 计算总盈亏（合约+现货）
+     */
+    public BigDecimal getTotalPnlWithHedge(BigDecimal currentPrice) {
+        BigDecimal contractPnl = unrealizedPnl != null ? unrealizedPnl : BigDecimal.ZERO;
+        BigDecimal spotPnl = getSpotPnl(currentPrice);
+        // SHORT 方向：合约亏 = 现货赚，所以直接相加即可（负负得正）
+        return contractPnl.add(spotPnl);
+    }
+
+    /**
+     * 检查是否满足最低持仓时间要求
+     */
+    public boolean meetsMinHoldingTime() {
+        return getHoldingHours() >= Config.MIN_HOLDING_HOURS;
+    }
+
+    /**
+     * 计算持仓偏离度（用于再平衡检查）
+     * @return 偏离比例（如 0.10 = 偏离10%）
+     */
+    public BigDecimal getHedgeDeviationRatio(BigDecimal currentPrice) {
+        if (!hedged) return BigDecimal.ZERO;
+        BigDecimal contractNotional = getContractNotionalValue(currentPrice);
+        BigDecimal spotNotional = getSpotNotionalValue(currentPrice);
+        if (contractNotional.compareTo(BigDecimal.ZERO) <= 0) return BigDecimal.ZERO;
+        
+        // |合约价值 - 现货价值| / 合约价值
+        return contractNotional.subtract(spotNotional).abs()
+                .divide(contractNotional, 8, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * 检查是否需要再平衡
+     * @param threshold 偏离阈值（如 0.10 = 10%）
+     */
+    public boolean needsRebalance(BigDecimal currentPrice, BigDecimal threshold) {
+        if (!hedged) return false;
+        return getHedgeDeviationRatio(currentPrice).compareTo(threshold) > 0;
     }
 
     /**

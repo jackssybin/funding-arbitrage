@@ -76,9 +76,9 @@ public class Config {
             getEnv("POSITION_VALUE_USDT", "1000")
     );
     
-    // 资金费率阈值：超过这个值开仓 (默认 0.05%)
+    // 资金费率阈值：超过这个值开仓 (默认 0.40%，覆盖手续费+滑点成本)
     public static final BigDecimal FUNDING_RATE_THRESHOLD = new BigDecimal(
-            getEnv("FUNDING_RATE_THRESHOLD", "0.0005")
+            getEnv("FUNDING_RATE_THRESHOLD", "0.0040")
     );
 
     public static final BigDecimal MIN_FUNDING_RATE_POSITIVE = new BigDecimal(
@@ -152,6 +152,28 @@ public class Config {
             getEnv("LIVE_COST_DEVIATION_INCLUDE_ESTIMATED", "false")
     );
 
+    // ========== 实盘现货对冲配置 ==========
+    public static final boolean SPOT_HEDGE_ENABLED = Boolean.parseBoolean(
+            getEnv("SPOT_HEDGE_ENABLED", "false")
+    );
+
+    public static final BigDecimal SPOT_HEDGE_RATIO = new BigDecimal(
+            getEnv("SPOT_HEDGE_RATIO", "1.0")
+    );
+
+    public static final BigDecimal SPOT_TAKER_FEE_RATE = new BigDecimal(
+            getEnv("SPOT_TAKER_FEE_RATE", "0.0010")
+    );
+
+    public static final BigDecimal SPOT_SLIPPAGE_RATE = new BigDecimal(
+            getEnv("SPOT_SLIPPAGE_RATE", "0.0005")
+    );
+
+    public static final int MIN_HOLDING_HOURS = Integer.parseInt(
+            getEnv("MIN_HOLDING_HOURS", "8")
+    );
+
+    // ========== 回测现货对冲配置 ==========
     public static final boolean BACKTEST_SPOT_HEDGE_ENABLED = Boolean.parseBoolean(
             getEnv("BACKTEST_SPOT_HEDGE_ENABLED", "false")
     );
@@ -169,7 +191,7 @@ public class Config {
     );
 
     public static final BigDecimal BACKTEST_SPOT_SLIPPAGE_RATE = new BigDecimal(
-            getEnv("BACKTEST_SPOT_SLIPPAGE_RATE", "0.0002")
+            getEnv("BACKTEST_SPOT_SLIPPAGE_RATE", "0.0005")
     );
 
     public static final BigDecimal BACKTEST_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS = new BigDecimal(

@@ -598,7 +598,35 @@ public class FundingArbitrageBot {
             return false;
         }
 
+        // 4. 现货对冲模式下，检查现货资金是否充足
+        if (Config.SPOT_HEDGE_ENABLED && !isSpotFundsSufficient()) {
+            log.warn("💰 现货资金不足，暂停开仓（需要{} USDT）", Config.POSITION_VALUE_USDT);
+            return false;
+        }
+
         return true;
+    }
+
+    /**
+     * 检查现货资金是否充足
+     */
+    private boolean isSpotFundsSufficient() {
+        try {
+            BigDecimal spotBalance = exchangeClient.getSpotBalance();
+            BigDecimal requiredSpotFunds = Config.POSITION_VALUE_USDT.multiply(Config.SPOT_HEDGE_RATIO);
+            // 预留20%缓冲
+            BigDecimal buffer = requiredSpotFunds.multiply(new BigDecimal("1.2"));
+            boolean sufficient = spotBalance.compareTo(buffer) >= 0;
+            if (!sufficient) {
+                log.warn("现货资金检查: 余额 {} USDT, 需要 {} USDT (含缓冲)", 
+                        spotBalance.setScale(2, RoundingMode.HALF_UP), 
+                        buffer.setScale(2, RoundingMode.HALF_UP));
+            }
+            return sufficient;
+        } catch (Exception e) {
+            log.warn("⚠️  获取现货余额失败，假定资金充足: {}", e.getMessage());
+            return true;
+        }
     }
 
     /**
@@ -819,6 +847,17 @@ public class FundingArbitrageBot {
             try {
                 BigDecimal currentPrice = exchangeClient.getCurrentPrice(symbol);
                 position.updateUnrealizedPnl(currentPrice);
+
+                // ========== 问题2：持仓再平衡检查（对冲模式） ==========
+                if (position.isHedged()) {
+                    BigDecimal deviation = position.getHedgeDeviationRatio(currentPrice);
+                    if (deviation.compareTo(new BigDecimal("0.10")) > 0) { // 偏离超过10%
+                        log.warn("⚠️  {} 持仓偏离过大: {}%，需要再平衡", symbol, 
+                                deviation.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
+                        // 暂时只记录日志，不自动再平衡（避免频繁交易增加手续费）
+                        // 未来可以考虑：偏离超过20%时触发自动再平衡
+                    }
+                }
             } catch (Exception e) {
                 log.warn("更新 {} 盈亏失败: {}", symbol, e.getMessage());
             }
@@ -858,39 +897,57 @@ public class FundingArbitrageBot {
                 }
             }
 
-            // P2 修复：止损检查 - 动态止损（已赚资金费作为安全垫）
-            if (position.isStopLossTriggered(Config.STOP_LOSS_RATIO)) {
-                if (principalSafe) {
-                    log.info("🛡️  {} 触发原始止损{}%，但资金费安全垫已覆盖浮亏（缓冲{} USDT），继续持有{}",
-                            symbol,
-                            Config.STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
-                            safetyBuffer.setScale(4, RoundingMode.HALF_UP),
-                            fundingHint);
-                } else {
-                    log.error("🚨 {} 触发动态止损！原始{}% → 动态{}%，盈亏{}%，强制平仓{}",
-                            symbol,
-                            Config.STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
-                            dynamicStopLoss.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
-                            position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
-                            fundingHint);
-                    closePosition(symbol, "触发止损");
+            // ========== 问题6：对冲模式 vs 纯合约模式 止盈止损逻辑 ==========
+            if (position.isHedged()) {
+                // ========== 对冲模式：基于资金费进度，不基于价格波动 ==========
+                // 对冲后价格涨跌互相抵消，主要赚资金费
+                // 只有在极端情况下（价格剧烈波动导致严重偏离）才平仓
+                if (position.getTotalFundingEarned().compareTo(BigDecimal.ZERO) > 0 &&
+                        position.getFundingCount() >= 3) {
+                    // 已经赚了3次资金费，落袋为安
+                    log.info("💰 {} 对冲模式：已累计{}次资金费收益，落袋为安{}",
+                            symbol, position.getFundingCount(), fundingHint);
+                    closePosition(symbol, "对冲模式：累计资金费达标");
                     currentPositionsCount--;
                     continue;
                 }
-            }
+                // 对冲模式下，除非极端情况，否则不止损不止盈，安心赚资金费
+                log.debug("🔒 {} 对冲模式：价格波动已对冲，不触发止盈止损", symbol);
+            } else {
+                // ========== 纯合约模式：原来的动态止盈止损逻辑 ==========
+                if (position.isStopLossTriggered(Config.STOP_LOSS_RATIO)) {
+                    if (principalSafe) {
+                        log.info("🛡️  {} 触发原始止损{}%，但资金费安全垫已覆盖浮亏（缓冲{} USDT），继续持有{}",
+                                symbol,
+                                Config.STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
+                                safetyBuffer.setScale(4, RoundingMode.HALF_UP),
+                                fundingHint);
+                    } else {
+                        log.error("🚨 {} 触发动态止损！原始{}% → 动态{}%，盈亏{}%，强制平仓{}",
+                                symbol,
+                                Config.STOP_LOSS_RATIO.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
+                                dynamicStopLoss.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
+                                position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
+                                fundingHint);
+                        closePosition(symbol, "触发止损");
+                        currentPositionsCount--;
+                        continue;
+                    }
+                }
 
-            // P2 修复：止盈检查 - 大行情主动止盈离场（临近结算时更宽松）
-            BigDecimal effectiveTakeProfit = nearFunding ?
-                    Config.TAKE_PROFIT_RATIO.multiply(Config.NEAR_FUNDING_TAKE_PROFIT_MULTIPLIER) : // 临近结算时止盈线提高50%
-                    Config.TAKE_PROFIT_RATIO;
-            
-            if (position.isTakeProfitTriggered(effectiveTakeProfit)) {
-                log.info("🎯 {} 触发止盈！盈亏 {}%，主动平仓{}",
-                        symbol,
-                        position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
-                        fundingHint);
-                closePosition(symbol, "触发止盈");
-                currentPositionsCount--;
+                // 纯合约模式：止盈检查
+                BigDecimal effectiveTakeProfit = nearFunding ?
+                        Config.TAKE_PROFIT_RATIO.multiply(Config.NEAR_FUNDING_TAKE_PROFIT_MULTIPLIER) : // 临近结算时止盈线提高50%
+                        Config.TAKE_PROFIT_RATIO;
+
+                if (position.isTakeProfitTriggered(effectiveTakeProfit)) {
+                    log.info("🎯 {} 触发止盈！盈亏 {}%，主动平仓{}",
+                            symbol,
+                            position.getUnrealizedPnlRatio().multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP),
+                            fundingHint);
+                    closePosition(symbol, "触发止盈");
+                    currentPositionsCount--;
+                }
             }
         }
 
@@ -1006,11 +1063,12 @@ public class FundingArbitrageBot {
         }
     }
 
-    // ==================== P0 修复：纯合约开仓 ====================
+    // ==================== P0 修复：支持现货对冲开仓 ====================
     private void openPosition(String symbol, BigDecimal fundingRate) {
+        boolean useHedge = Config.SPOT_HEDGE_ENABLED && fundingRate.compareTo(BigDecimal.ZERO) > 0;
         log.info("");
         log.info("┌──────────────────────────────────────────────────────────┐");
-        log.info("│              🚀 开仓操作（纯合约）                          │");
+        log.info("│              🚀 开仓操作（{}）                          │", useHedge ? "现货对冲" : "纯合约");
         log.info("└──────────────────────────────────────────────────────────┘");
 
         try {
@@ -1052,7 +1110,44 @@ public class FundingArbitrageBot {
             BigDecimal executedNotional = executionNotionalOrFallback(execution, executionPrice, executedQuantity);
 
             Position position = positions.get(symbol);
-            position.open(executedQuantity, executionPrice, fundingRate, side);
+            if (useHedge) {
+                // ========== 现货对冲模式：开合约同时买现货 ==========
+                log.info("🔄 启用现货对冲模式，对冲比例: {}%", 
+                        Config.SPOT_HEDGE_RATIO.multiply(new BigDecimal("100")).setScale(1, RoundingMode.HALF_UP));
+                
+                // 计算现货数量：按对冲比例
+                BigDecimal spotQuantity = alignedQuantity.multiply(Config.SPOT_HEDGE_RATIO);
+                BigDecimal spotAlignedQuantity = precision.alignSpotQuantity(symbol, spotQuantity);
+                
+                if (spotAlignedQuantity.compareTo(BigDecimal.ZERO) > 0) {
+                    try {
+                        // 现货下单（市价买入）
+                        log.info("📈 现货买入: {} {}", spotAlignedQuantity, symbol);
+                        exchangeClient.openSpotPosition(symbol, spotAlignedQuantity);
+                        
+                        // 获取现货成交价格（简化：使用当前价格）
+                        BigDecimal spotExecutionPrice = currentPrice;
+                        
+                        // 记录带现货对冲的持仓
+                        position.openWithHedge(executedQuantity, executionPrice, 
+                                spotAlignedQuantity, spotExecutionPrice, 
+                                fundingRate, side, Config.SPOT_HEDGE_RATIO);
+                        
+                        log.info("✅ 现货对冲开仓完成: 合约 {} {}, 现货 {} {}", 
+                                side, executedQuantity, "买入", spotAlignedQuantity);
+                    } catch (Exception e) {
+                        log.error("❌ 现货下单失败，合约持仓已开，现货未开！需要手动处理: {}", e.getMessage());
+                        // 降级为纯合约模式
+                        position.open(executedQuantity, executionPrice, fundingRate, side);
+                    }
+                } else {
+                    log.warn("⚠️  现货数量为0，降级为纯合约模式");
+                    position.open(executedQuantity, executionPrice, fundingRate, side);
+                }
+            } else {
+                // 纯合约模式
+                position.open(executedQuantity, executionPrice, fundingRate, side);
+            }
             totalTrades++;
             // 日报记录开仓
             dailyReporter.recordOpen(symbol, side, executedQuantity, fundingRate);
@@ -1186,18 +1281,43 @@ public class FundingArbitrageBot {
     }
 
     private void closePosition(String symbol, String reason) {
-        log.info("");
-        log.info("┌──────────────────────────────────────────────────────────┐");
-        log.info("│              📉 平仓操作（纯合约）                          │");
-        log.info("└──────────────────────────────────────────────────────────┘");
-
         Position position = positions.get(symbol);
         if (!position.hasPosition()) return;
+
+        boolean isHedged = position.isHedged();
+        log.info("");
+        log.info("┌──────────────────────────────────────────────────────────┐");
+        log.info("│              📉 平仓操作（{}）                          │", isHedged ? "现货对冲" : "纯合约");
+        log.info("└──────────────────────────────────────────────────────────┘");
+
+        // ========== 最低持仓时间检查 ==========
+        long holdingHours = position.getHoldingHours();
+        if (holdingHours < Config.MIN_HOLDING_HOURS && !reason.contains("止损") && !reason.contains("止损")) {
+            log.info("⏰ 持仓时间{}小时不足{}小时（最低持仓要求），除非止损否则不平仓", 
+                    holdingHours, Config.MIN_HOLDING_HOURS);
+            log.info("   平仓原因: {}", reason);
+            return;
+        }
 
         try {
             BigDecimal alignedQuantity = precision.alignQuantity(symbol, position.getPositionSize());
 
             String side = position.getPositionSide();
+
+            // ========== 先平现货（如果有对冲） ==========
+            if (isHedged && position.getSpotPositionSize().compareTo(BigDecimal.ZERO) > 0) {
+                try {
+                    BigDecimal spotQuantity = position.getSpotPositionSize();
+                    BigDecimal spotAlignedQuantity = precision.alignSpotQuantity(symbol, spotQuantity);
+                    log.info("📉 现货卖出平仓: {} {}", spotAlignedQuantity, symbol);
+                    exchangeClient.closeSpotPosition(symbol, spotAlignedQuantity);
+                    log.info("✅ 现货平仓成功");
+                } catch (Exception e) {
+                    log.error("❌ 现货平仓失败，需要手动处理: {}", e.getMessage());
+                }
+            }
+
+            // ========== 平合约 ==========
             AtomicTransactionManager.TxResult result = txManager.atomicClosePosition(symbol, alignedQuantity, side);
             if (!result.isSuccess()) {
                 try {

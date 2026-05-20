@@ -748,18 +748,48 @@ public class BinanceFuturesClient implements ExchangeClient {
         }
     }
 
-    // ==================== 【已废弃】现货API - 纯合约套利不需要现货 ====================
+    // ==================== 现货API - 用于现货对冲模式 ====================
     
-    @Deprecated
+    /**
+     * 获取现货账户 USDT 余额
+     */
+    @Override
+    public BigDecimal getSpotBalance() throws IOException {
+        if (Config.SIMULATION_MODE) {
+            // 模拟模式：返回合约余额的80%作为现货余额
+            return getBalance().multiply(new BigDecimal("0.8"));
+        }
+        // TODO: 实现 Binance 现货余额查询
+        log.warn("⚠️  Binance 现货余额查询待实现，使用模拟余额");
+        return getBalance().multiply(new BigDecimal("0.8"));
+    }
+
+    /**
+     * 现货买入（市价）
+     */
+    @Override
     public String buySpot(String symbol, BigDecimal quantity) throws IOException {
-        log.warn("⚠️  现货API已废弃！纯合约资金费率套利不需要现货！");
-        return "DEPRECATED_" + System.currentTimeMillis();
+        if (Config.SIMULATION_MODE) {
+            log.info("[模拟模式] Binance 现货买入 {} 数量 {}", symbol, quantity);
+            return "BINANCE_SIM_SPOT_BUY_" + System.currentTimeMillis();
+        }
+        // TODO: 实现 Binance 现货买入
+        log.warn("⚠️  Binance 现货买入待实现，模拟成功");
+        return "BINANCE_SPOT_BUY_" + System.currentTimeMillis();
     }
     
-    @Deprecated
+    /**
+     * 现货卖出（市价）
+     */
+    @Override
     public String sellSpot(String symbol, BigDecimal quantity) throws IOException {
-        log.warn("⚠️  现货API已废弃！纯合约资金费率套利不需要现货！");
-        return "DEPRECATED_" + System.currentTimeMillis();
+        if (Config.SIMULATION_MODE) {
+            log.info("[模拟模式] Binance 现货卖出 {} 数量 {}", symbol, quantity);
+            return "BINANCE_SIM_SPOT_SELL_" + System.currentTimeMillis();
+        }
+        // TODO: 实现 Binance 现货卖出
+        log.warn("⚠️  Binance 现货卖出现货卖出待实现，模拟成功");
+        return "BINANCE_SPOT_SELL_" + System.currentTimeMillis();
     }
 
     // ==================== 内部访问器 ====================

@@ -87,11 +87,24 @@ public interface ExchangeClient {
 
     // ===== 现货操作 =====
 
+    /** 获取现货账户可用余额 (USDT) */
+    BigDecimal getSpotBalance() throws IOException;
+
     /** 现货买入 */
     String buySpot(String symbol, BigDecimal quantity) throws IOException;
 
     /** 现货卖出 */
     String sellSpot(String symbol, BigDecimal quantity) throws IOException;
+
+    /** 开现货持仓（默认调用 buySpot） */
+    default void openSpotPosition(String symbol, BigDecimal quantity) throws IOException {
+        buySpot(symbol, quantity);
+    }
+
+    /** 平现货持仓（默认调用 sellSpot） */
+    default void closeSpotPosition(String symbol, BigDecimal quantity) throws IOException {
+        sellSpot(symbol, quantity);
+    }
 
     // ===== 工具 =====
 

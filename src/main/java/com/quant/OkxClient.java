@@ -519,6 +519,34 @@ public class OkxClient implements ExchangeClient {
     // ===================================================================
 
     /**
+     * 获取现货账户 USDT 余额
+     * OKX 接口：GET /api/v5/account/balance（ccy=USDT）
+     */
+    @Override
+    public BigDecimal getSpotBalance() throws IOException {
+        if (Config.SIMULATION_MODE) {
+            // 模拟模式：返回合约余额相同的数字
+            return getBalance().multiply(new BigDecimal("0.8"));
+        }
+
+        String path = "/api/v5/account/balance?ccy=USDT";
+        Request request = buildSignedRequest("GET", path, null);
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = checkResponse(response, "获取现货余额");
+            JsonNode json = mapper.readTree(body);
+            JsonNode data = json.get("data");
+            if (data != null && data.size() > 0) {
+                JsonNode details = data.get(0).get("details");
+                if (details != null && details.size() > 0) {
+                    String availBal = details.get(0).get("availBal").asText("0");
+                    return new BigDecimal(availBal);
+                }
+            }
+            return BigDecimal.ZERO;
+        }
+    }
+
+    /**
      * 现货买入
      * OKX 接口：POST /api/v5/trade/order（instType=SPOT）
      */

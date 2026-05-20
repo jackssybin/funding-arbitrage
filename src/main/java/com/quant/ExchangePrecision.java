@@ -151,6 +151,15 @@ public class ExchangePrecision {
     }
 
     /**
+     * 对齐现货数量精度（合约和现货可能有不同的精度规则）
+     * 默认使用合约数量规则，不同交易所可以覆盖
+     */
+    public BigDecimal alignSpotQuantity(String symbol, BigDecimal quantity) {
+        // 现货与合约使用相同的精度规则
+        return alignQuantity(symbol, quantity);
+    }
+
+    /**
      * 对齐价格精度（限价单用）
      */
     public BigDecimal alignPrice(String symbol, BigDecimal price) {
