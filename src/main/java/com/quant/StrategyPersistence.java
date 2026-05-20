@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import java.io.File;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -30,17 +31,24 @@ public class StrategyPersistence {
     private final ObjectMapper mapper;
     private final String stateFile;
     private final String tradesFile;
+    private final String executionCostsFile;
 
     public StrategyPersistence() {
-        this.dataDir = System.getProperty("user.dir") + File.separator + "data";
+        this(new File(System.getProperty("user.dir"), "data"));
+    }
+
+    StrategyPersistence(File dataDir) {
+        this.dataDir = dataDir.getPath();
         this.mapper = new ObjectMapper();
         this.mapper.enable(SerializationFeature.INDENT_OUTPUT);
         this.mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
         this.stateFile = dataDir + File.separator + "strategy_state.json";
         this.tradesFile = dataDir + File.separator + "trades_history.csv";
+        this.executionCostsFile = dataDir + File.separator + "execution_costs.csv";
 
         initDataDir();
+        ensureExecutionCostsFile();
     }
 
     private void initDataDir() {
@@ -65,6 +73,20 @@ public class StrategyPersistence {
     /**
      * 保存策略状态
      */
+    private void ensureExecutionCostsFile() {
+        File costsCsv = new File(executionCostsFile);
+        if (!costsCsv.exists()) {
+            try {
+                String header = "time,type,symbol,side,orderIds,estimatedFee,actualFee,feeDelta,"
+                        + "estimatedSlippage,actualSlippage,slippageDelta,expectedNetFunding,"
+                        + "actualNotional,executionPrice,estimatedPrice,executionEstimated\n";
+                java.nio.file.Files.write(costsCsv.toPath(), header.getBytes("UTF-8"));
+            } catch (IOException e) {
+                log.warn("鍒濆鍖栨墽琛屾垚鏈褰曞け璐? {}", e.getMessage());
+            }
+        }
+    }
+
     public void saveState(Map<String, Position> positions, BigDecimal totalPnl, int totalTrades) {
         saveState(positions, totalPnl, totalTrades, 0L);
     }
@@ -162,6 +184,77 @@ public class StrategyPersistence {
         appendToCsv(line);
     }
 
+    public void recordExecutionCost(String type, String symbol, String side, String orderIds,
+                                    BigDecimal estimatedFee, BigDecimal actualFee,
+                                    BigDecimal estimatedSlippage, BigDecimal actualSlippage,
+                                    BigDecimal expectedNetFunding, BigDecimal actualNotional,
+                                    BigDecimal executionPrice, BigDecimal estimatedPrice,
+                                    boolean executionEstimated) {
+        BigDecimal feeDelta = safe(actualFee).subtract(safe(estimatedFee));
+        BigDecimal slippageDelta = safe(actualSlippage).subtract(safe(estimatedSlippage));
+        String line = String.join(",",
+                LocalDateTime.now().format(dtf),
+                csv(type),
+                csv(symbol),
+                csv(side),
+                csv(orderIds),
+                decimal(estimatedFee),
+                decimal(actualFee),
+                decimal(feeDelta),
+                decimal(estimatedSlippage),
+                decimal(actualSlippage),
+                decimal(slippageDelta),
+                decimal(expectedNetFunding),
+                decimal(actualNotional),
+                decimal(executionPrice),
+                decimal(estimatedPrice),
+                Boolean.toString(executionEstimated)
+        ) + "\n";
+
+        try {
+            java.nio.file.Files.write(
+                    new File(executionCostsFile).toPath(),
+                    line.getBytes("UTF-8"),
+                    java.nio.file.StandardOpenOption.APPEND
+            );
+        } catch (IOException e) {
+            log.warn("鍐欏叆鎵ц鎴愭湰璁板綍澶辫触: {}", e.getMessage());
+        }
+    }
+
+    public CostDeviationStats getRecentCostDeviationStats(String symbol, int maxRows, boolean includeEstimated) {
+        File file = new File(executionCostsFile);
+        if (!file.exists()) {
+            return CostDeviationStats.empty();
+        }
+
+        try {
+            List<String> lines = java.nio.file.Files.readAllLines(file.toPath());
+            int start = Math.max(1, lines.size() - Math.max(0, maxRows));
+            CostDeviationStats stats = new CostDeviationStats();
+            for (int i = start; i < lines.size(); i++) {
+                String[] parts = splitCsvLine(lines.get(i));
+                if (parts.length < 16) {
+                    continue;
+                }
+                if (symbol != null && !symbol.isEmpty() && !symbol.equalsIgnoreCase(parts[2])) {
+                    continue;
+                }
+                boolean estimated = Boolean.parseBoolean(parts[15]);
+                if (estimated && !includeEstimated) {
+                    continue;
+                }
+                stats.sampleCount++;
+                stats.positiveFeeDelta = stats.positiveFeeDelta.add(positive(parseDecimal(parts[7])));
+                stats.positiveSlippageDelta = stats.positiveSlippageDelta.add(positive(parseDecimal(parts[10])));
+            }
+            return stats;
+        } catch (Exception e) {
+            log.warn("璇诲彇鎵ц鎴愭湰鍋忓樊澶辫触: {}", e.getMessage());
+            return CostDeviationStats.empty();
+        }
+    }
+
     private void appendToCsv(String line) {
         try {
             java.nio.file.Files.write(
@@ -177,6 +270,62 @@ public class StrategyPersistence {
     /**
      * 获取今日交易统计
      */
+    private BigDecimal safe(BigDecimal value) {
+        return value == null ? BigDecimal.ZERO : value;
+    }
+
+    private String decimal(BigDecimal value) {
+        if (value == null) {
+            return "";
+        }
+        return value.setScale(8, RoundingMode.HALF_UP).stripTrailingZeros().toPlainString();
+    }
+
+    private String csv(String value) {
+        if (value == null) {
+            return "";
+        }
+        if (value.contains(",") || value.contains("\"") || value.contains("\n")) {
+            return "\"" + value.replace("\"", "\"\"") + "\"";
+        }
+        return value;
+    }
+
+    private String[] splitCsvLine(String line) {
+        List<String> values = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < line.length(); i++) {
+            char ch = line.charAt(i);
+            if (ch == '"') {
+                if (quoted && i + 1 < line.length() && line.charAt(i + 1) == '"') {
+                    current.append('"');
+                    i++;
+                } else {
+                    quoted = !quoted;
+                }
+            } else if (ch == ',' && !quoted) {
+                values.add(current.toString());
+                current.setLength(0);
+            } else {
+                current.append(ch);
+            }
+        }
+        values.add(current.toString());
+        return values.toArray(new String[0]);
+    }
+
+    private BigDecimal parseDecimal(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return BigDecimal.ZERO;
+        }
+        return new BigDecimal(value.trim());
+    }
+
+    private BigDecimal positive(BigDecimal value) {
+        return value.compareTo(BigDecimal.ZERO) > 0 ? value : BigDecimal.ZERO;
+    }
+
     public DailyStats getTodayStats() {
         DailyStats stats = new DailyStats();
         String today = LocalDateTime.now().format(dateDtf);
@@ -227,5 +376,23 @@ public class StrategyPersistence {
         public int openCount = 0;
         public int closeCount = 0;
         public int fundingCount = 0;
+    }
+
+    public static class CostDeviationStats {
+        public int sampleCount = 0;
+        public BigDecimal positiveFeeDelta = BigDecimal.ZERO;
+        public BigDecimal positiveSlippageDelta = BigDecimal.ZERO;
+
+        public static CostDeviationStats empty() {
+            return new CostDeviationStats();
+        }
+
+        public BigDecimal averagePositiveOneWayDelta() {
+            if (sampleCount <= 0) {
+                return BigDecimal.ZERO;
+            }
+            return positiveFeeDelta.add(positiveSlippageDelta)
+                    .divide(BigDecimal.valueOf(sampleCount), 8, RoundingMode.HALF_UP);
+        }
     }
 }

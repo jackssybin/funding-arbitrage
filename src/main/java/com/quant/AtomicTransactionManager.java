@@ -62,6 +62,7 @@ public class AtomicTransactionManager {
 
         if (success) {
             result.status = TxStatus.SUCCESS;
+            result.executionReport = operation.executionReport;
             result.message = "✅ 合约开仓成功";
             log.info("✅ 合约开仓成功");
         } else {
@@ -94,6 +95,7 @@ public class AtomicTransactionManager {
 
         if (success) {
             result.status = TxStatus.SUCCESS;
+            result.executionReport = operation.executionReport;
             result.message = "✅ 合约平仓成功";
             log.info("✅ 合约平仓成功");
         } else {
@@ -149,6 +151,7 @@ public class AtomicTransactionManager {
                     orderId = smartOrderExecutor.smartOpenLong(op.symbol, op.quantity);
                 }
                 op.orderId = orderId;
+                op.executionReport = loadExecutionReport(op);
                 op.status = "SUCCESS";
                 log.info("✅ 开仓订单执行成功: {}", orderId);
                 return true;
@@ -162,6 +165,7 @@ public class AtomicTransactionManager {
                     orderId = smartOrderExecutor.smartCloseLong(op.symbol, op.quantity);
                 }
                 op.orderId = orderId;
+                op.executionReport = loadExecutionReport(op);
                 op.status = "SUCCESS";
                 log.info("✅ 平仓订单执行成功: {}", orderId);
                 return true;
@@ -174,6 +178,16 @@ public class AtomicTransactionManager {
 
         op.status = "FAILED";
         return false;
+    }
+
+    private TradeExecutionReport loadExecutionReport(TxOperation op) throws IOException {
+        BigDecimal fallbackPrice = exchangeClient.getCurrentPrice(op.symbol);
+        TradeExecutionReport report = exchangeClient.getTradeExecutionReport(
+                op.symbol, op.orderId, op.quantity, fallbackPrice);
+        if (report == null) {
+            return TradeExecutionReport.estimated(op.symbol, op.orderId, op.quantity, fallbackPrice);
+        }
+        return report;
     }
 
     /**
@@ -208,6 +222,7 @@ public class AtomicTransactionManager {
         public BigDecimal quantity;
         public String status;
         public String orderId;
+        public TradeExecutionReport executionReport;
         public String errorMsg;
 
         public TxOperation(String type, String symbol, BigDecimal quantity) {
@@ -228,6 +243,7 @@ public class AtomicTransactionManager {
         public TxStatus status;
         public List<TxOperation> operations = new ArrayList<>();
         public String message;
+        public TradeExecutionReport executionReport;
 
         public boolean isSuccess() {
             return status == TxStatus.SUCCESS;

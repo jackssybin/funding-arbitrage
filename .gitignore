@@ -50,6 +50,9 @@ Thumbs.db
 *.log
 logs/
 data/strategy_state.json
+data/trades_history.csv
+data/execution_costs.csv
+data/daily_reports/
 pid.txt
 
 # ================================

@@ -415,6 +415,59 @@ public class OkxClient implements ExchangeClient {
      * OKX 接口：GET /api/v5/account/positions?instId=BTC-USDT-SWAP
      */
     @Override
+    public TradeExecutionReport getTradeExecutionReport(String symbol, String orderIds, BigDecimal fallbackQuantity,
+                                                        BigDecimal fallbackPrice) throws IOException {
+        if (Config.SIMULATION_MODE || orderIds == null || orderIds.trim().isEmpty()) {
+            return TradeExecutionReport.estimated(symbol, orderIds, fallbackQuantity, fallbackPrice);
+        }
+
+        String instId = toOkxInstId(symbol);
+        TradeExecutionReport report = new TradeExecutionReport(symbol, orderIds);
+        for (String rawOrderId : orderIds.split(",")) {
+            String orderId = rawOrderId.trim();
+            if (orderId.isEmpty() || orderId.startsWith("OKX_SIM_")) {
+                continue;
+            }
+            appendOrderFills(report, instId, orderId);
+        }
+
+        if (report.getExecutedQuantity().compareTo(BigDecimal.ZERO) <= 0) {
+            log.warn("{} OKX order {} fills not found, using estimated execution report", symbol, orderIds);
+            return TradeExecutionReport.estimated(symbol, orderIds, fallbackQuantity, fallbackPrice);
+        }
+        log.info("{} OKX order {} execution report: qty={}, avgPrice={}, fee={} {}",
+                symbol,
+                orderIds,
+                report.getExecutedQuantity().setScale(8, RoundingMode.HALF_UP),
+                report.getAveragePrice().setScale(8, RoundingMode.HALF_UP),
+                report.getFee().setScale(8, RoundingMode.HALF_UP),
+                report.getFeeAsset());
+        return report;
+    }
+
+    private void appendOrderFills(TradeExecutionReport report, String instId, String orderId) throws IOException {
+        String path = "/api/v5/trade/fills-history?instType=SWAP&instId=" + instId + "&ordId=" + orderId;
+        Request request = buildSignedRequest("GET", path, "");
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = checkResponse(response, "查询OKX成交明细");
+            JsonNode fills = mapper.readTree(body).get("data");
+            if (fills == null) {
+                return;
+            }
+            for (JsonNode fill : fills) {
+                report.addFill(
+                        readDecimal(fill, "fillPx", "0"),
+                        readDecimal(fill, "fillSz", "0"),
+                        readDecimal(fill, "fee", "0"),
+                        fill.hasNonNull("feeCcy") ? fill.get("feeCcy").asText() : "USDT",
+                        readDecimal(fill, "fillPnl", "0"),
+                        fill.hasNonNull("tradeId") ? fill.get("tradeId").asText() : null
+                );
+            }
+        }
+    }
+
+    @Override
     public BigDecimal getPositionAmount(String symbol) throws IOException {
         if (Config.SIMULATION_MODE) return BigDecimal.ZERO;
 

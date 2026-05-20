@@ -531,6 +531,67 @@ public class BinanceFuturesClient implements ExchangeClient {
      * 获取当前持仓数量
      * GET /fapi/v2/positionRisk
      */
+    @Override
+    public TradeExecutionReport getTradeExecutionReport(String symbol, String orderIds, BigDecimal fallbackQuantity,
+                                                        BigDecimal fallbackPrice) throws IOException {
+        if (Config.SIMULATION_MODE || orderIds == null || orderIds.trim().isEmpty()) {
+            return TradeExecutionReport.estimated(symbol, orderIds, fallbackQuantity, fallbackPrice);
+        }
+
+        TradeExecutionReport report = new TradeExecutionReport(symbol, orderIds);
+        for (String rawOrderId : orderIds.split(",")) {
+            String orderId = rawOrderId.trim();
+            if (orderId.isEmpty() || orderId.startsWith("SIM_")) {
+                continue;
+            }
+            appendOrderTrades(report, symbol, orderId);
+        }
+
+        if (report.getExecutedQuantity().compareTo(BigDecimal.ZERO) <= 0) {
+            log.warn("{} order {} trade fills not found, using estimated execution report", symbol, orderIds);
+            return TradeExecutionReport.estimated(symbol, orderIds, fallbackQuantity, fallbackPrice);
+        }
+        log.info("{} order {} execution report: qty={}, avgPrice={}, fee={} {}",
+                symbol,
+                orderIds,
+                report.getExecutedQuantity().setScale(8, RoundingMode.HALF_UP),
+                report.getAveragePrice().setScale(8, RoundingMode.HALF_UP),
+                report.getFee().setScale(8, RoundingMode.HALF_UP),
+                report.getFeeAsset());
+        return report;
+    }
+
+    private void appendOrderTrades(TradeExecutionReport report, String symbol, String orderId) throws IOException {
+        long timestamp = System.currentTimeMillis();
+        String params = "symbol=" + symbol + "&orderId=" + orderId + "&timestamp=" + timestamp;
+        String signature = sign(params);
+        String url = baseUrl + "/fapi/v1/userTrades?" + params + "&signature=" + signature;
+
+        Request request = new Request.Builder()
+                .url(url)
+                .header("X-MBX-APIKEY", apiKey)
+                .get()
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            String responseBody = response.body().string();
+            if (!response.isSuccessful()) {
+                throw new IOException("query order trades failed: " + response.code() + " " + responseBody);
+            }
+            JsonNode trades = mapper.readTree(responseBody);
+            for (JsonNode trade : trades) {
+                report.addFill(
+                        readDecimal(trade, "price", "0"),
+                        readDecimal(trade, "qty", "0"),
+                        readDecimal(trade, "commission", "0"),
+                        trade.hasNonNull("commissionAsset") ? trade.get("commissionAsset").asText() : "USDT",
+                        readDecimal(trade, "realizedPnl", "0"),
+                        trade.hasNonNull("id") ? trade.get("id").asText() : null
+                );
+            }
+        }
+    }
+
     public BigDecimal getPositionAmount(String symbol) throws IOException {
         if (Config.SIMULATION_MODE) {
             return BigDecimal.ZERO;

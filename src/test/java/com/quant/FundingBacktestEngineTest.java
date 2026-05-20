@@ -89,4 +89,61 @@ class FundingBacktestEngineTest {
         assertEquals(1, result.filteredByMarketState);
         assertTrue(result.filteredByReason.containsKey("HIGH_LOW_RANGE"));
     }
+
+    @Test
+    void hedgedPositiveFundingOffsetsPriceMoveAndTracksSpotLeg() {
+        FundingBacktestEngine engine = new FundingBacktestEngine();
+        FundingBacktestEngine.BacktestConfig config = new FundingBacktestEngine.BacktestConfig();
+        config.notional = new BigDecimal("1000");
+        config.openRate = new BigDecimal("0.0010");
+        config.closeRate = new BigDecimal("0.0001");
+        config.takerFeeRate = BigDecimal.ZERO;
+        config.slippageRate = BigDecimal.ZERO;
+        config.spotTakerFeeRate = BigDecimal.ZERO;
+        config.spotSlippageRate = BigDecimal.ZERO;
+        config.hedgeEnabled = true;
+        config.hedgeRatio = BigDecimal.ONE;
+        config.stopLossRatio = new BigDecimal("0.50");
+        config.leverage = 3;
+
+        FundingBacktestEngine.BacktestResult result = engine.run(Arrays.asList(
+                new FundingBacktestEngine.MarketBar(LocalDateTime.parse("2026-01-01T00:00:00"),
+                        "BTCUSDT", new BigDecimal("100"), new BigDecimal("0.0010")),
+                new FundingBacktestEngine.MarketBar(LocalDateTime.parse("2026-01-01T08:00:00"),
+                        "BTCUSDT", new BigDecimal("120"), new BigDecimal("0.0010")),
+                new FundingBacktestEngine.MarketBar(LocalDateTime.parse("2026-01-01T16:00:00"),
+                        "BTCUSDT", new BigDecimal("120"), BigDecimal.ZERO)
+        ), config);
+
+        assertEquals(1, result.closedTrades);
+        assertEquals(0, result.totalPnl.compareTo(new BigDecimal("1.000000")));
+        assertEquals(0, result.fundingIncome.compareTo(new BigDecimal("1.000000")));
+        assertEquals(0, result.tradingPnl.compareTo(new BigDecimal("0.000000")));
+        assertEquals(0, result.hedgePricePnl.compareTo(new BigDecimal("200.000000")));
+        assertEquals(0, result.maxCapitalUsed.compareTo(new BigDecimal("1333.333333")));
+    }
+
+    @Test
+    void hedgeEntryRejectsWhenFundingCannotCoverRoundTripCosts() {
+        FundingBacktestEngine engine = new FundingBacktestEngine();
+        FundingBacktestEngine.BacktestConfig config = new FundingBacktestEngine.BacktestConfig();
+        config.notional = new BigDecimal("1000");
+        config.openRate = new BigDecimal("0.0010");
+        config.takerFeeRate = new BigDecimal("0.0010");
+        config.slippageRate = BigDecimal.ZERO;
+        config.spotTakerFeeRate = new BigDecimal("0.0010");
+        config.spotSlippageRate = BigDecimal.ZERO;
+        config.hedgeEnabled = true;
+        config.minExpectedNetFundingAfterCosts = BigDecimal.ZERO;
+
+        FundingBacktestEngine.BacktestResult result = engine.run(Arrays.asList(
+                new FundingBacktestEngine.MarketBar(LocalDateTime.parse("2026-01-01T00:00:00"),
+                        "BTCUSDT", new BigDecimal("100"), new BigDecimal("0.0010"))
+        ), config);
+
+        assertEquals(0, result.trades);
+        assertEquals(1, result.filteredByMarketState);
+        assertTrue(result.filteredByReason.containsKey("EXPECTED_NET_AFTER_COSTS"));
+        assertTrue(result.filteredHypotheticalPnl.compareTo(BigDecimal.ZERO) < 0);
+    }
 }

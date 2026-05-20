@@ -469,6 +469,76 @@ public class FundingArbitrageBot {
         return marketDataService.isMarketStateAcceptableForEntry(symbol, currentRate);
     }
 
+    private boolean isExpectedNetFundingAcceptable(String symbol, BigDecimal fundingRate) {
+        BigDecimal expectedFunding = expectedFundingForConfiguredSettlements(fundingRate);
+        BigDecimal roundTripFee = estimatedRoundTripFee();
+        BigDecimal roundTripSlippage = estimatedRoundTripSlippage();
+        BigDecimal costDeviationBuffer = historicalCostDeviationBuffer(symbol);
+        BigDecimal expectedNet = expectedNetFundingAfterCosts(fundingRate).subtract(costDeviationBuffer);
+
+        if (expectedNet.compareTo(Config.LIVE_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS) < 0) {
+            log.info("{} 跳过开仓：预计资金费({}次结算) {} USDT，往返手续费 {} USDT，往返滑点 {} USDT，历史成本偏差缓冲 {} USDT，净收益 {} USDT，低于最低要求 {} USDT",
+                    symbol,
+                    Config.LIVE_EXPECTED_FUNDING_SETTLEMENTS,
+                    expectedFunding.setScale(4, RoundingMode.HALF_UP),
+                    roundTripFee.setScale(4, RoundingMode.HALF_UP),
+                    roundTripSlippage.setScale(4, RoundingMode.HALF_UP),
+                    costDeviationBuffer.setScale(4, RoundingMode.HALF_UP),
+                    expectedNet.setScale(4, RoundingMode.HALF_UP),
+                    Config.LIVE_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS.setScale(4, RoundingMode.HALF_UP));
+            return false;
+        }
+        log.debug("{} 预计净收益通过：资金费({}次结算) {} USDT - 手续费 {} USDT - 滑点 {} USDT - 历史成本偏差缓冲 {} USDT = {} USDT",
+                symbol,
+                Config.LIVE_EXPECTED_FUNDING_SETTLEMENTS,
+                expectedFunding.setScale(4, RoundingMode.HALF_UP),
+                roundTripFee.setScale(4, RoundingMode.HALF_UP),
+                roundTripSlippage.setScale(4, RoundingMode.HALF_UP),
+                costDeviationBuffer.setScale(4, RoundingMode.HALF_UP),
+                expectedNet.setScale(4, RoundingMode.HALF_UP));
+        return true;
+    }
+
+    private BigDecimal expectedFundingForConfiguredSettlements(BigDecimal fundingRate) {
+        return Config.POSITION_VALUE_USDT
+                .multiply(fundingRate.abs())
+                .multiply(BigDecimal.valueOf(Config.LIVE_EXPECTED_FUNDING_SETTLEMENTS));
+    }
+
+    private BigDecimal estimatedRoundTripFee() {
+        return Config.POSITION_VALUE_USDT
+                .multiply(Config.LIVE_TAKER_FEE_RATE)
+                .multiply(new BigDecimal("2"));
+    }
+
+    private BigDecimal estimatedRoundTripSlippage() {
+        return Config.POSITION_VALUE_USDT
+                .multiply(Config.LIVE_SLIPPAGE_RATE)
+                .multiply(new BigDecimal("2"));
+    }
+
+    private BigDecimal expectedNetFundingAfterCosts(BigDecimal fundingRate) {
+        return expectedFundingForConfiguredSettlements(fundingRate)
+                .subtract(estimatedRoundTripFee())
+                .subtract(estimatedRoundTripSlippage());
+    }
+
+    private BigDecimal historicalCostDeviationBuffer(String symbol) {
+        if (!Config.LIVE_COST_DEVIATION_BUFFER_ENABLED || persistence == null) {
+            return BigDecimal.ZERO;
+        }
+        StrategyPersistence.CostDeviationStats stats = persistence.getRecentCostDeviationStats(
+                symbol,
+                Config.LIVE_COST_DEVIATION_LOOKBACK_ROWS,
+                Config.LIVE_COST_DEVIATION_INCLUDE_ESTIMATED);
+        if (stats.sampleCount < Config.LIVE_COST_DEVIATION_MIN_SAMPLES) {
+            return BigDecimal.ZERO;
+        }
+        return stats.averagePositiveOneWayDelta()
+                .multiply(new BigDecimal("2"))
+                .multiply(Config.LIVE_COST_DEVIATION_BUFFER_MULTIPLIER);
+    }
+
     private BigDecimal calculateNetExposure() {
         if (riskManager == null) {
             riskManager = new RiskManager();
@@ -866,6 +936,9 @@ public class FundingArbitrageBot {
             if (!isLiveMarketStateAcceptable(symbol, rate)) {
                 continue;
             }
+            if (!isExpectedNetFundingAcceptable(symbol, rate)) {
+                continue;
+            }
 
             // 【新增3: 净敞口检查 - 防止单边全空/全多
             String side = rate.compareTo(BigDecimal.ZERO) >= 0 ? "SHORT" : "LONG";
@@ -915,7 +988,7 @@ public class FundingArbitrageBot {
                     if (veryNearFunding) {
                         log.info("⏰ {} 距离结算仅{}小时，不移仓，先拿到资金费", 
                                 toClose.getSymbol(), hoursToFunding);
-                    } else if (costAnalysis.worthIt) {
+                    } else if (costAnalysis.worthIt && isExpectedNetFundingAcceptable(symbol, rate)) {
                         log.info("🔄 移仓分析：{}", costAnalysis);
                         log.info("🔄 移仓：从 {} ({}%) 到 {} ({}%), 差值 {}% 净收益为正，执行移仓",
                                 toClose.getSymbol(),
@@ -963,20 +1036,44 @@ public class FundingArbitrageBot {
             log.info("资金费率方向: {} ({}), 合约方向: {}", fundingRate,
                     fundingRate.compareTo(BigDecimal.ZERO) >= 0 ? "正（多头付空头）" : "负（空头付多头）", sideName);
 
+            if (!isExpectedNetFundingAcceptable(symbol, fundingRate)) {
+                return;
+            }
+
+            BigDecimal estimatedOpenNotional = currentPrice.multiply(alignedQuantity);
             AtomicTransactionManager.TxResult result = txManager.atomicOpenPosition(symbol, alignedQuantity, fundingRate);
             if (!result.isSuccess()) {
                 throw new IOException("开仓失败: " + result.message);
             }
 
+            TradeExecutionReport execution = result.executionReport;
+            BigDecimal executionPrice = executionPriceOrFallback(execution, currentPrice);
+            BigDecimal executedQuantity = executionQuantityOrFallback(execution, alignedQuantity);
+            BigDecimal executedNotional = executionNotionalOrFallback(execution, executionPrice, executedQuantity);
+
             Position position = positions.get(symbol);
-            position.open(alignedQuantity, currentPrice, fundingRate, side);
+            position.open(executedQuantity, executionPrice, fundingRate, side);
             totalTrades++;
             // 日报记录开仓
-            dailyReporter.recordOpen(symbol, side, alignedQuantity, fundingRate);
+            dailyReporter.recordOpen(symbol, side, executedQuantity, fundingRate);
 
             // ✅ 计算开仓手续费（双边：开仓）
-            BigDecimal positionValue = currentPrice.multiply(alignedQuantity);
-            BigDecimal openFee = positionValue.multiply(Config.LIVE_TAKER_FEE_RATE);
+            BigDecimal positionValue = executedNotional;
+            BigDecimal openFee = executionFeeOrFallback(execution, positionValue);
+            recordExecutionCost(
+                    "OPEN",
+                    symbol,
+                    side,
+                    executionOrderIds(execution, result),
+                    estimatedOneWayFee(estimatedOpenNotional),
+                    openFee,
+                    estimatedOneWaySlippage(estimatedOpenNotional),
+                    executionSlippageCost(currentPrice, executionPrice, executedQuantity),
+                    expectedNetFundingAfterCosts(fundingRate),
+                    positionValue,
+                    executionPrice,
+                    currentPrice,
+                    execution);
             // ✅ 更新模拟账户余额：扣除开仓手续费
             exchangeClient.updateSimulatedBalance(openFee.negate());
 
@@ -990,17 +1087,17 @@ public class FundingArbitrageBot {
             try {
                 BigDecimal openBalance = exchangeClient.getBalance();
                 log.info("");
-                log.info("🎉 开仓完成！ {} {} ({}), 预计年化 {}%, 手续费 {} USDT", symbol, sideName, alignedQuantity, annualized, openFee.setScale(4, RoundingMode.HALF_UP));
+                log.info("🎉 开仓完成！ {} {} ({}), 成交均价 {}, 预计年化 {}%, 手续费 {} USDT", symbol, sideName, executedQuantity, executionPrice.setScale(8, RoundingMode.HALF_UP), annualized, openFee.setScale(4, RoundingMode.HALF_UP));
                 log.info("");
                 // 飞书推送：开仓通知
-                feishuNotifier.sendOpenPosition(symbol, sideName, alignedQuantity, fundingRate, annualized, openBalance, expectedEarningOpen, openFee);
+                feishuNotifier.sendOpenPosition(symbol, sideName, executedQuantity, fundingRate, annualized, openBalance, expectedEarningOpen, openFee);
             } catch (IOException e) {
                 log.warn("⚠️  获取余额失败，飞书通知将不带余额信息: {}", e.getMessage());
                 log.info("");
-                log.info("🎉 开仓完成！ {} {} ({}), 预计年化 {}%, 手续费 {} USDT", symbol, sideName, alignedQuantity, annualized, openFee.setScale(4, RoundingMode.HALF_UP));
+                log.info("🎉 开仓完成！ {} {} ({}), 成交均价 {}, 预计年化 {}%, 手续费 {} USDT", symbol, sideName, executedQuantity, executionPrice.setScale(8, RoundingMode.HALF_UP), annualized, openFee.setScale(4, RoundingMode.HALF_UP));
                 log.info("");
                 // 飞书推送：开仓通知
-                feishuNotifier.sendOpenPosition(symbol, sideName, alignedQuantity, fundingRate, annualized, BigDecimal.ZERO, expectedEarningOpen, openFee);
+                feishuNotifier.sendOpenPosition(symbol, sideName, executedQuantity, fundingRate, annualized, BigDecimal.ZERO, expectedEarningOpen, openFee);
             }
 
         } catch (Exception e) {
@@ -1012,6 +1109,82 @@ public class FundingArbitrageBot {
         closePosition(symbol, "费率降低/止盈止损");
     }
     
+    private BigDecimal executionPriceOrFallback(TradeExecutionReport execution, BigDecimal fallbackPrice) {
+        if (execution != null && execution.getAveragePrice().compareTo(BigDecimal.ZERO) > 0) {
+            return execution.getAveragePrice();
+        }
+        return fallbackPrice;
+    }
+
+    private BigDecimal executionQuantityOrFallback(TradeExecutionReport execution, BigDecimal fallbackQuantity) {
+        if (execution != null && execution.getExecutedQuantity().compareTo(BigDecimal.ZERO) > 0) {
+            return execution.getExecutedQuantity();
+        }
+        return fallbackQuantity;
+    }
+
+    private BigDecimal executionNotionalOrFallback(TradeExecutionReport execution, BigDecimal price,
+                                                   BigDecimal quantity) {
+        if (execution != null && execution.getNotional().compareTo(BigDecimal.ZERO) > 0) {
+            return execution.getNotional();
+        }
+        return price.multiply(quantity);
+    }
+
+    private BigDecimal executionFeeOrFallback(TradeExecutionReport execution, BigDecimal notional) {
+        if (execution != null && "USDT".equalsIgnoreCase(execution.getFeeAsset())
+                && execution.getFee().compareTo(BigDecimal.ZERO) > 0) {
+            return execution.getFee();
+        }
+        return notional.multiply(Config.LIVE_TAKER_FEE_RATE);
+    }
+
+    private BigDecimal estimatedOneWayFee(BigDecimal notional) {
+        return notional.multiply(Config.LIVE_TAKER_FEE_RATE);
+    }
+
+    private BigDecimal estimatedOneWaySlippage(BigDecimal notional) {
+        return notional.multiply(Config.LIVE_SLIPPAGE_RATE);
+    }
+
+    private BigDecimal executionSlippageCost(BigDecimal estimatedPrice, BigDecimal executionPrice,
+                                             BigDecimal quantity) {
+        if (estimatedPrice == null || executionPrice == null || quantity == null) {
+            return BigDecimal.ZERO;
+        }
+        return executionPrice.subtract(estimatedPrice).abs().multiply(quantity.abs());
+    }
+
+    private String executionOrderIds(TradeExecutionReport execution, AtomicTransactionManager.TxResult result) {
+        if (execution != null && execution.getOrderIds() != null && !execution.getOrderIds().isEmpty()) {
+            return execution.getOrderIds();
+        }
+        if (result != null && result.operations != null) {
+            return result.operations.stream()
+                    .map(op -> op.orderId)
+                    .filter(Objects::nonNull)
+                    .filter(id -> !id.isEmpty())
+                    .reduce((left, right) -> left + "," + right)
+                    .orElse("");
+        }
+        return "";
+    }
+
+    private void recordExecutionCost(String type, String symbol, String side, String orderIds,
+                                     BigDecimal estimatedFee, BigDecimal actualFee,
+                                     BigDecimal estimatedSlippage, BigDecimal actualSlippage,
+                                     BigDecimal expectedNetFunding, BigDecimal actualNotional,
+                                     BigDecimal executionPrice, BigDecimal estimatedPrice,
+                                     TradeExecutionReport execution) {
+        if (persistence == null) {
+            return;
+        }
+        boolean estimated = execution == null || execution.isEstimated();
+        persistence.recordExecutionCost(type, symbol, side, orderIds, estimatedFee, actualFee,
+                estimatedSlippage, actualSlippage, expectedNetFunding, actualNotional,
+                executionPrice, estimatedPrice, estimated);
+    }
+
     private void closePosition(String symbol, String reason) {
         log.info("");
         log.info("┌──────────────────────────────────────────────────────────┐");
@@ -1043,13 +1216,20 @@ public class FundingArbitrageBot {
             BigDecimal closePrice = position.getMarkPrice() != null ? position.getMarkPrice() : position.getEntryPrice();
             try {
                 closePrice = exchangeClient.getCurrentPrice(symbol);
-                position.updateUnrealizedPnl(closePrice);
             } catch (Exception e) {
                 log.warn("⚠️  获取 {} 最新价格失败，使用已有浮盈亏计算平仓收益: {}", symbol, e.getMessage());
             }
 
             // 计算平仓盈亏（浮盈浮亏实现化）
             // ⚠️ 注意：资金费收益已经在每次结算时加到totalPnl中了，这里只加买卖盈亏！
+            BigDecimal estimatedClosePrice = closePrice;
+            BigDecimal estimatedCloseNotional = estimatedClosePrice.multiply(alignedQuantity);
+            TradeExecutionReport execution = result.executionReport;
+            closePrice = executionPriceOrFallback(execution, closePrice);
+            BigDecimal executedQuantity = executionQuantityOrFallback(execution, alignedQuantity);
+            BigDecimal executedNotional = executionNotionalOrFallback(execution, closePrice, executedQuantity);
+            position.updateUnrealizedPnl(closePrice);
+
             BigDecimal closePnl = BigDecimal.ZERO;
             if (position.getUnrealizedPnl() != null) {
                 closePnl = position.getUnrealizedPnl();
@@ -1059,8 +1239,22 @@ public class FundingArbitrageBot {
 
             // ✅ 计算平仓手续费
             BigDecimal positionValue = position.getEntryPrice().multiply(position.getPositionSize());
-            BigDecimal closePositionValue = closePrice.multiply(alignedQuantity);
-            BigDecimal closeFee = closePositionValue.multiply(Config.LIVE_TAKER_FEE_RATE);
+            BigDecimal closePositionValue = executedNotional;
+            BigDecimal closeFee = executionFeeOrFallback(execution, closePositionValue);
+            recordExecutionCost(
+                    "CLOSE",
+                    symbol,
+                    side,
+                    executionOrderIds(execution, result),
+                    estimatedOneWayFee(estimatedCloseNotional),
+                    closeFee,
+                    estimatedOneWaySlippage(estimatedCloseNotional),
+                    executionSlippageCost(estimatedClosePrice, closePrice, executedQuantity),
+                    BigDecimal.ZERO,
+                    closePositionValue,
+                    closePrice,
+                    estimatedClosePrice,
+                    execution);
             // ✅ 更新模拟账户余额：加上平仓盈亏，扣除平仓手续费
             //   注意：资金费收益已经在每次结算时加到totalPnl了，这里只加买卖盈亏
             exchangeClient.updateSimulatedBalance(closePnl.subtract(closeFee));

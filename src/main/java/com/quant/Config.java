@@ -124,6 +124,58 @@ public class Config {
             getEnv("LIVE_SLIPPAGE_RATE", "0.0002")
     );
 
+    public static final BigDecimal LIVE_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS = new BigDecimal(
+            getEnv("LIVE_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS", "0")
+    );
+
+    public static final int LIVE_EXPECTED_FUNDING_SETTLEMENTS = Integer.parseInt(
+            getEnv("LIVE_EXPECTED_FUNDING_SETTLEMENTS", "1")
+    );
+
+    public static final boolean LIVE_COST_DEVIATION_BUFFER_ENABLED = Boolean.parseBoolean(
+            getEnv("LIVE_COST_DEVIATION_BUFFER_ENABLED", "true")
+    );
+
+    public static final int LIVE_COST_DEVIATION_LOOKBACK_ROWS = Integer.parseInt(
+            getEnv("LIVE_COST_DEVIATION_LOOKBACK_ROWS", "100")
+    );
+
+    public static final int LIVE_COST_DEVIATION_MIN_SAMPLES = Integer.parseInt(
+            getEnv("LIVE_COST_DEVIATION_MIN_SAMPLES", "10")
+    );
+
+    public static final BigDecimal LIVE_COST_DEVIATION_BUFFER_MULTIPLIER = new BigDecimal(
+            getEnv("LIVE_COST_DEVIATION_BUFFER_MULTIPLIER", "1.5")
+    );
+
+    public static final boolean LIVE_COST_DEVIATION_INCLUDE_ESTIMATED = Boolean.parseBoolean(
+            getEnv("LIVE_COST_DEVIATION_INCLUDE_ESTIMATED", "false")
+    );
+
+    public static final boolean BACKTEST_SPOT_HEDGE_ENABLED = Boolean.parseBoolean(
+            getEnv("BACKTEST_SPOT_HEDGE_ENABLED", "false")
+    );
+
+    public static final boolean BACKTEST_SPOT_HEDGE_POSITIVE_FUNDING_ONLY = Boolean.parseBoolean(
+            getEnv("BACKTEST_SPOT_HEDGE_POSITIVE_FUNDING_ONLY", "true")
+    );
+
+    public static final BigDecimal BACKTEST_SPOT_HEDGE_RATIO = new BigDecimal(
+            getEnv("BACKTEST_SPOT_HEDGE_RATIO", "1")
+    );
+
+    public static final BigDecimal BACKTEST_SPOT_TAKER_FEE_RATE = new BigDecimal(
+            getEnv("BACKTEST_SPOT_TAKER_FEE_RATE", "0.0010")
+    );
+
+    public static final BigDecimal BACKTEST_SPOT_SLIPPAGE_RATE = new BigDecimal(
+            getEnv("BACKTEST_SPOT_SLIPPAGE_RATE", "0.0002")
+    );
+
+    public static final BigDecimal BACKTEST_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS = new BigDecimal(
+            getEnv("BACKTEST_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS", "0")
+    );
+
     public static final boolean BACKTEST_MARKET_STATE_FILTER_ENABLED = Boolean.parseBoolean(
             getEnv("BACKTEST_MARKET_STATE_FILTER_ENABLED", "false")
     );

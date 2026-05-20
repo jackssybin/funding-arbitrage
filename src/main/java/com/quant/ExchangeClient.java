@@ -67,6 +67,11 @@ public interface ExchangeClient {
 
     /** 合约平多（卖出平仓） */
     String closeLong(String symbol, BigDecimal quantity) throws IOException;
+
+    default TradeExecutionReport getTradeExecutionReport(String symbol, String orderIds, BigDecimal fallbackQuantity,
+                                                         BigDecimal fallbackPrice) throws IOException {
+        return TradeExecutionReport.estimated(symbol, orderIds, fallbackQuantity, fallbackPrice);
+    }
     /** 查询合约持仓数量（负数=空仓） - 已废弃，请使用 getCurrentPosition */
     @Deprecated
     BigDecimal getPositionAmount(String symbol) throws IOException;

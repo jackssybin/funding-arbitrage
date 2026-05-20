@@ -106,6 +106,32 @@ class BotStateAndRiskTest {
         assertEquals(0, client.balanceDelta.compareTo(new BigDecimal("9.945000000")));
     }
 
+    @Test
+    void closePositionUsesExecutionReportPriceAndFeeWhenAvailable() throws Exception {
+        FundingArbitrageBot bot = new FundingArbitrageBot();
+        FakeExchangeClient client = new FakeExchangeClient(false, new BigDecimal("10000"), new BigDecimal("110"));
+        client.executionReport = new TradeExecutionReport("BTCUSDT", "close-long");
+        client.executionReport.addFill(new BigDecimal("108"), BigDecimal.ONE,
+                new BigDecimal("0.040"), "USDT", BigDecimal.ZERO, "fill-1");
+        setField(bot, "exchangeClient", client);
+        setField(bot, "precision", new ExchangePrecision(null));
+        setField(bot, "txManager", new AtomicTransactionManager(client, new ClosingSmartOrderExecutor(client)));
+        setField(bot, "feishuNotifier", new FeishuNotifier());
+        setField(bot, "dailyReporter", new DailyReporter());
+
+        Map<String, Position> positions = positionsOf(bot);
+        Position position = new Position("BTCUSDT");
+        position.restore(BigDecimal.ONE, new BigDecimal("100"), new BigDecimal("-0.0010"),
+                "LONG", LocalDateTime.now().minusHours(8), 0, BigDecimal.ZERO);
+        positions.put("BTCUSDT", position);
+
+        Method close = FundingArbitrageBot.class.getDeclaredMethod("closePosition", String.class, String.class);
+        close.setAccessible(true);
+        close.invoke(bot, "BTCUSDT", "test-close");
+
+        assertEquals(0, client.balanceDelta.compareTo(new BigDecimal("7.960")));
+    }
+
     @SuppressWarnings("unchecked")
     private Map<String, Position> positionsOf(FundingArbitrageBot bot) throws Exception {
         Field field = FundingArbitrageBot.class.getDeclaredField("positions");
@@ -140,6 +166,7 @@ class BotStateAndRiskTest {
         final BigDecimal balance;
         final BigDecimal currentPrice;
         BigDecimal balanceDelta = BigDecimal.ZERO;
+        TradeExecutionReport executionReport;
 
         FakeExchangeClient(boolean failBalance, BigDecimal balance, BigDecimal currentPrice) {
             this.failBalance = failBalance;
@@ -194,6 +221,15 @@ class BotStateAndRiskTest {
         @Override
         public String closeLong(String symbol, BigDecimal quantity) {
             return "close-long";
+        }
+
+        @Override
+        public TradeExecutionReport getTradeExecutionReport(String symbol, String orderIds, BigDecimal fallbackQuantity,
+                                                            BigDecimal fallbackPrice) throws IOException {
+            if (executionReport != null) {
+                return executionReport;
+            }
+            return ExchangeClient.super.getTradeExecutionReport(symbol, orderIds, fallbackQuantity, fallbackPrice);
         }
 
         @Override

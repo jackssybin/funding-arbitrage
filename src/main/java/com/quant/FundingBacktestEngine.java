@@ -66,8 +66,7 @@ public class FundingBacktestEngine {
                     BigDecimal unrealized = position.unrealizedPnl(bar.price);
                     BigDecimal tradePnl = closePosition(position, bar.price, config, result, stats);
                     cashPnl = cashPnl.add(unrealized)
-                            .subtract(config.oneWayFee(position.notional))
-                            .subtract(config.oneWaySlippage(position.notional));
+                            .subtract(closeCashCost(position, config));
                     recordClosedTrade(tradePnl, result, stats);
                     positions.remove(bar.symbol);
                 }
@@ -77,30 +76,38 @@ public class FundingBacktestEngine {
             if (positions.size() < config.maxConcurrentPositions
                     && bar.fundingRate.abs().compareTo(config.openRate) >= 0) {
                 String side = bar.fundingRate.compareTo(BigDecimal.ZERO) >= 0 ? "SHORT" : "LONG";
+                MarketStateDecision hedgeDecision = evaluateHedgeEntry(side, bar, config);
+                if (!hedgeDecision.accepted) {
+                    recordFilteredEntry(hedgeDecision.reason, result, stats);
+                    if (hedgeDecision.trackHypothetical) {
+                        filteredShadows.add(new FilteredShadowPosition(createPosition(bar, side, config),
+                                hedgeDecision.reason));
+                    }
+                    continue;
+                }
                 MarketStateDecision decision = evaluateMarketState(bar.symbol, side, marketHistory, bar, config);
                 if (!decision.accepted) {
-                    result.filteredByMarketState++;
-                    stats.filteredByMarketState++;
-                    stats.filteredByReason.computeIfAbsent(decision.reason, FilterReasonStats::new).filteredCount++;
-                    result.filteredByReason.computeIfAbsent(decision.reason, FilterReasonStats::new).filteredCount++;
-                    filteredShadows.add(new FilteredShadowPosition(
-                            new BacktestPosition(bar.symbol, side, bar.price, config.notional, config.leverage,
-                                    config.oneWayFee(config.notional), config.oneWaySlippage(config.notional)),
-                            decision.reason));
+                    recordFilteredEntry(decision.reason, result, stats);
+                    filteredShadows.add(new FilteredShadowPosition(createPosition(bar, side, config), decision.reason));
                     continue;
                 }
 
-                BigDecimal openFee = config.oneWayFee(config.notional);
-                BigDecimal openSlippage = config.oneWaySlippage(config.notional);
-                position = new BacktestPosition(bar.symbol, side, bar.price, config.notional, config.leverage,
-                        openFee, openSlippage);
+                position = createPosition(bar, side, config);
                 positions.put(bar.symbol, position);
+                BigDecimal openFee = position.totalOpenFee();
+                BigDecimal openSlippage = position.totalOpenSlippage();
                 cashPnl = cashPnl.subtract(openFee).subtract(openSlippage);
                 result.feeCost = result.feeCost.add(openFee);
                 result.slippageCost = result.slippageCost.add(openSlippage);
+                result.spotFeeCost = result.spotFeeCost.add(position.spotOpenFee);
+                result.spotSlippageCost = result.spotSlippageCost.add(position.spotOpenSlippage);
+                result.maxCapitalUsed = result.maxCapitalUsed.max(position.capitalUsed());
                 result.trades++;
                 stats.feeCost = stats.feeCost.add(openFee);
                 stats.slippageCost = stats.slippageCost.add(openSlippage);
+                stats.spotFeeCost = stats.spotFeeCost.add(position.spotOpenFee);
+                stats.spotSlippageCost = stats.spotSlippageCost.add(position.spotOpenSlippage);
+                stats.maxCapitalUsed = stats.maxCapitalUsed.max(position.capitalUsed());
                 stats.trades++;
                 updateSymbolDrawdown(stats, position, bar.price);
             }
@@ -113,8 +120,7 @@ public class FundingBacktestEngine {
             BigDecimal unrealized = position.unrealizedPnl(last.price);
             BigDecimal tradePnl = closePosition(position, last.price, config, result, stats);
             cashPnl = cashPnl.add(unrealized)
-                    .subtract(config.oneWayFee(position.notional))
-                    .subtract(config.oneWaySlippage(position.notional));
+                    .subtract(closeCashCost(position, config));
             recordClosedTrade(tradePnl, result, stats);
         }
 
@@ -175,6 +181,43 @@ public class FundingBacktestEngine {
 
     private void appendBar(Map<String, List<MarketBar>> marketHistory, MarketBar bar) {
         marketHistory.computeIfAbsent(bar.symbol, ignored -> new ArrayList<>()).add(bar);
+    }
+
+    private MarketStateDecision evaluateHedgeEntry(String side, MarketBar current, BacktestConfig config) {
+        if (!config.hedgeEnabled) {
+            return MarketStateDecision.accepted();
+        }
+        if (config.hedgePositiveFundingOnly && !"SHORT".equals(side)) {
+            return MarketStateDecision.rejected("UNSUPPORTED_HEDGE_DIRECTION", false);
+        }
+        BigDecimal expectedFunding = config.notional.multiply(current.fundingRate.abs());
+        BigDecimal expectedCost = config.roundTripFee(config.notional)
+                .add(config.roundTripSlippage(config.notional))
+                .add(config.roundTripSpotFee(config.spotNotional()))
+                .add(config.roundTripSpotSlippage(config.spotNotional()));
+        BigDecimal expectedNet = expectedFunding.subtract(expectedCost);
+        if (expectedNet.compareTo(config.minExpectedNetFundingAfterCosts) < 0) {
+            return MarketStateDecision.rejected("EXPECTED_NET_AFTER_COSTS");
+        }
+        return MarketStateDecision.accepted();
+    }
+
+    private BacktestPosition createPosition(MarketBar bar, String side, BacktestConfig config) {
+        BigDecimal futuresOpenFee = config.oneWayFee(config.notional);
+        BigDecimal futuresOpenSlippage = config.oneWaySlippage(config.notional);
+        boolean hedged = config.hedgeEnabled && "SHORT".equals(side) && bar.fundingRate.compareTo(BigDecimal.ZERO) > 0;
+        BigDecimal spotNotional = hedged ? config.spotNotional() : BigDecimal.ZERO;
+        BigDecimal spotOpenFee = hedged ? config.oneWaySpotFee(spotNotional) : BigDecimal.ZERO;
+        BigDecimal spotOpenSlippage = hedged ? config.oneWaySpotSlippage(spotNotional) : BigDecimal.ZERO;
+        return new BacktestPosition(bar.symbol, side, bar.price, config.notional, config.leverage,
+                futuresOpenFee, futuresOpenSlippage, hedged, spotNotional, spotOpenFee, spotOpenSlippage);
+    }
+
+    private void recordFilteredEntry(String reason, BacktestResult result, SymbolStats stats) {
+        result.filteredByMarketState++;
+        stats.filteredByMarketState++;
+        stats.filteredByReason.computeIfAbsent(reason, FilterReasonStats::new).filteredCount++;
+        result.filteredByReason.computeIfAbsent(reason, FilterReasonStats::new).filteredCount++;
     }
 
     private MarketStateDecision evaluateMarketState(String symbol, String side,
@@ -336,8 +379,8 @@ public class FundingBacktestEngine {
         BigDecimal equity = stats.totalPnl
                 .add(position.accruedFunding)
                 .add(position.unrealizedPnl(price))
-                .subtract(position.openFee)
-                .subtract(position.openSlippage);
+                .subtract(position.totalOpenFee())
+                .subtract(position.totalOpenSlippage());
         if (equity.compareTo(stats.equityHigh) > 0) {
             stats.equityHigh = equity;
         }
@@ -357,24 +400,41 @@ public class FundingBacktestEngine {
         throw new IllegalArgumentException("No market bar for open position symbol: " + symbol);
     }
 
+    private BigDecimal closeCashCost(BacktestPosition position, BacktestConfig config) {
+        return config.oneWayFee(position.notional)
+                .add(config.oneWaySlippage(position.notional))
+                .add(position.hedged ? config.oneWaySpotFee(position.spotNotional) : BigDecimal.ZERO)
+                .add(position.hedged ? config.oneWaySpotSlippage(position.spotNotional) : BigDecimal.ZERO);
+    }
+
     private BigDecimal closePosition(BacktestPosition position, BigDecimal price, BacktestConfig config,
                                      BacktestResult result, SymbolStats stats) {
         BigDecimal closeFee = config.oneWayFee(position.notional);
         BigDecimal closeSlippage = config.oneWaySlippage(position.notional);
+        BigDecimal spotCloseFee = position.hedged ? config.oneWaySpotFee(position.spotNotional) : BigDecimal.ZERO;
+        BigDecimal spotCloseSlippage = position.hedged ? config.oneWaySpotSlippage(position.spotNotional) : BigDecimal.ZERO;
         BigDecimal tradingPnl = position.unrealizedPnl(price);
         BigDecimal tradePnl = tradingPnl
                 .add(position.accruedFunding)
-                .subtract(position.openFee)
+                .subtract(position.totalOpenFee())
                 .subtract(closeFee)
-                .subtract(position.openSlippage)
-                .subtract(closeSlippage);
+                .subtract(spotCloseFee)
+                .subtract(position.totalOpenSlippage())
+                .subtract(closeSlippage)
+                .subtract(spotCloseSlippage);
 
-        result.feeCost = result.feeCost.add(closeFee);
-        result.slippageCost = result.slippageCost.add(closeSlippage);
+        result.feeCost = result.feeCost.add(closeFee).add(spotCloseFee);
+        result.slippageCost = result.slippageCost.add(closeSlippage).add(spotCloseSlippage);
+        result.spotFeeCost = result.spotFeeCost.add(spotCloseFee);
+        result.spotSlippageCost = result.spotSlippageCost.add(spotCloseSlippage);
         result.tradingPnl = result.tradingPnl.add(tradingPnl);
-        stats.feeCost = stats.feeCost.add(closeFee);
-        stats.slippageCost = stats.slippageCost.add(closeSlippage);
+        result.hedgePricePnl = result.hedgePricePnl.add(position.hedgePricePnl(price));
+        stats.feeCost = stats.feeCost.add(closeFee).add(spotCloseFee);
+        stats.slippageCost = stats.slippageCost.add(closeSlippage).add(spotCloseSlippage);
+        stats.spotFeeCost = stats.spotFeeCost.add(spotCloseFee);
+        stats.spotSlippageCost = stats.spotSlippageCost.add(spotCloseSlippage);
         stats.tradingPnl = stats.tradingPnl.add(tradingPnl);
+        stats.hedgePricePnl = stats.hedgePricePnl.add(position.hedgePricePnl(price));
         return tradePnl;
     }
 
@@ -402,12 +462,19 @@ public class FundingBacktestEngine {
                                      BacktestResult result, SymbolStats stats) {
         BigDecimal closeFee = config.oneWayFee(shadow.position.notional);
         BigDecimal closeSlippage = config.oneWaySlippage(shadow.position.notional);
+        BigDecimal spotCloseFee = shadow.position.hedged ? config.oneWaySpotFee(shadow.position.spotNotional)
+                : BigDecimal.ZERO;
+        BigDecimal spotCloseSlippage = shadow.position.hedged
+                ? config.oneWaySpotSlippage(shadow.position.spotNotional)
+                : BigDecimal.ZERO;
         BigDecimal pnl = shadow.position.unrealizedPnl(price)
                 .add(shadow.position.accruedFunding)
-                .subtract(shadow.position.openFee)
+                .subtract(shadow.position.totalOpenFee())
                 .subtract(closeFee)
-                .subtract(shadow.position.openSlippage)
-                .subtract(closeSlippage);
+                .subtract(spotCloseFee)
+                .subtract(shadow.position.totalOpenSlippage())
+                .subtract(closeSlippage)
+                .subtract(spotCloseSlippage);
 
         result.filteredHypotheticalPnl = result.filteredHypotheticalPnl.add(pnl);
         result.filteredClosedTrades++;
@@ -455,6 +522,10 @@ public class FundingBacktestEngine {
         result.feeCost = result.feeCost.setScale(6, RoundingMode.HALF_UP);
         result.slippageCost = result.slippageCost.setScale(6, RoundingMode.HALF_UP);
         result.tradingPnl = result.tradingPnl.setScale(6, RoundingMode.HALF_UP);
+        result.spotFeeCost = result.spotFeeCost.setScale(6, RoundingMode.HALF_UP);
+        result.spotSlippageCost = result.spotSlippageCost.setScale(6, RoundingMode.HALF_UP);
+        result.hedgePricePnl = result.hedgePricePnl.setScale(6, RoundingMode.HALF_UP);
+        result.maxCapitalUsed = result.maxCapitalUsed.setScale(6, RoundingMode.HALF_UP);
         result.filteredHypotheticalPnl = result.filteredHypotheticalPnl.setScale(6, RoundingMode.HALF_UP);
         result.winRate = ratio(result.winningTrades, result.closedTrades);
         result.filteredWinRate = ratio(result.filteredWinningTrades, result.filteredClosedTrades);
@@ -468,6 +539,10 @@ public class FundingBacktestEngine {
             stats.feeCost = stats.feeCost.setScale(6, RoundingMode.HALF_UP);
             stats.slippageCost = stats.slippageCost.setScale(6, RoundingMode.HALF_UP);
             stats.tradingPnl = stats.tradingPnl.setScale(6, RoundingMode.HALF_UP);
+            stats.spotFeeCost = stats.spotFeeCost.setScale(6, RoundingMode.HALF_UP);
+            stats.spotSlippageCost = stats.spotSlippageCost.setScale(6, RoundingMode.HALF_UP);
+            stats.hedgePricePnl = stats.hedgePricePnl.setScale(6, RoundingMode.HALF_UP);
+            stats.maxCapitalUsed = stats.maxCapitalUsed.setScale(6, RoundingMode.HALF_UP);
             stats.maxDrawdown = stats.maxDrawdown.setScale(6, RoundingMode.HALF_UP);
             stats.filteredHypotheticalPnl = stats.filteredHypotheticalPnl.setScale(6, RoundingMode.HALF_UP);
             stats.winRate = ratio(stats.winningTrades, stats.closedTrades);
@@ -607,6 +682,12 @@ public class FundingBacktestEngine {
         public BigDecimal maxBidAskSpreadRatio = Config.BACKTEST_MAX_BID_ASK_SPREAD_RATIO;
         public BigDecimal maxVolumeSpikeRatio = Config.BACKTEST_MAX_VOLUME_SPIKE_RATIO;
         public BigDecimal maxFundingPredictionDeviation = Config.BACKTEST_MAX_FUNDING_PREDICTION_DEVIATION;
+        public boolean hedgeEnabled = Config.BACKTEST_SPOT_HEDGE_ENABLED;
+        public boolean hedgePositiveFundingOnly = Config.BACKTEST_SPOT_HEDGE_POSITIVE_FUNDING_ONLY;
+        public BigDecimal hedgeRatio = Config.BACKTEST_SPOT_HEDGE_RATIO;
+        public BigDecimal spotTakerFeeRate = Config.BACKTEST_SPOT_TAKER_FEE_RATE;
+        public BigDecimal spotSlippageRate = Config.BACKTEST_SPOT_SLIPPAGE_RATE;
+        public BigDecimal minExpectedNetFundingAfterCosts = Config.BACKTEST_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS;
 
         BigDecimal oneWayFee(BigDecimal notionalValue) {
             return notionalValue.multiply(takerFeeRate);
@@ -614,6 +695,34 @@ public class FundingBacktestEngine {
 
         BigDecimal oneWaySlippage(BigDecimal notionalValue) {
             return notionalValue.multiply(slippageRate);
+        }
+
+        BigDecimal spotNotional() {
+            return notional.multiply(hedgeRatio);
+        }
+
+        BigDecimal oneWaySpotFee(BigDecimal notionalValue) {
+            return notionalValue.multiply(spotTakerFeeRate);
+        }
+
+        BigDecimal oneWaySpotSlippage(BigDecimal notionalValue) {
+            return notionalValue.multiply(spotSlippageRate);
+        }
+
+        BigDecimal roundTripFee(BigDecimal notionalValue) {
+            return oneWayFee(notionalValue).multiply(new BigDecimal("2"));
+        }
+
+        BigDecimal roundTripSlippage(BigDecimal notionalValue) {
+            return oneWaySlippage(notionalValue).multiply(new BigDecimal("2"));
+        }
+
+        BigDecimal roundTripSpotFee(BigDecimal notionalValue) {
+            return oneWaySpotFee(notionalValue).multiply(new BigDecimal("2"));
+        }
+
+        BigDecimal roundTripSpotSlippage(BigDecimal notionalValue) {
+            return oneWaySpotSlippage(notionalValue).multiply(new BigDecimal("2"));
         }
     }
 
@@ -623,6 +732,10 @@ public class FundingBacktestEngine {
         public BigDecimal tradingPnl = BigDecimal.ZERO;
         public BigDecimal feeCost = BigDecimal.ZERO;
         public BigDecimal slippageCost = BigDecimal.ZERO;
+        public BigDecimal spotFeeCost = BigDecimal.ZERO;
+        public BigDecimal spotSlippageCost = BigDecimal.ZERO;
+        public BigDecimal hedgePricePnl = BigDecimal.ZERO;
+        public BigDecimal maxCapitalUsed = BigDecimal.ZERO;
         public BigDecimal maxDrawdown = BigDecimal.ZERO;
         public BigDecimal winRate = BigDecimal.ZERO;
         public BigDecimal fundingIncomeRatio = BigDecimal.ZERO;
@@ -648,6 +761,10 @@ public class FundingBacktestEngine {
         public BigDecimal tradingPnl = BigDecimal.ZERO;
         public BigDecimal feeCost = BigDecimal.ZERO;
         public BigDecimal slippageCost = BigDecimal.ZERO;
+        public BigDecimal spotFeeCost = BigDecimal.ZERO;
+        public BigDecimal spotSlippageCost = BigDecimal.ZERO;
+        public BigDecimal hedgePricePnl = BigDecimal.ZERO;
+        public BigDecimal maxCapitalUsed = BigDecimal.ZERO;
         public BigDecimal maxDrawdown = BigDecimal.ZERO;
         public BigDecimal winRate = BigDecimal.ZERO;
         public BigDecimal fundingIncomeRatio = BigDecimal.ZERO;
@@ -720,10 +837,21 @@ public class FundingBacktestEngine {
         private final int leverage;
         private final BigDecimal openFee;
         private final BigDecimal openSlippage;
+        private final boolean hedged;
+        private final BigDecimal spotNotional;
+        private final BigDecimal spotOpenFee;
+        private final BigDecimal spotOpenSlippage;
         private BigDecimal accruedFunding = BigDecimal.ZERO;
 
         BacktestPosition(String symbol, String side, BigDecimal entryPrice, BigDecimal notional, int leverage,
                          BigDecimal openFee, BigDecimal openSlippage) {
+            this(symbol, side, entryPrice, notional, leverage, openFee, openSlippage,
+                    false, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO);
+        }
+
+        BacktestPosition(String symbol, String side, BigDecimal entryPrice, BigDecimal notional, int leverage,
+                         BigDecimal openFee, BigDecimal openSlippage, boolean hedged, BigDecimal spotNotional,
+                         BigDecimal spotOpenFee, BigDecimal spotOpenSlippage) {
             this.symbol = symbol;
             this.side = side;
             this.entryPrice = entryPrice;
@@ -731,9 +859,17 @@ public class FundingBacktestEngine {
             this.leverage = leverage;
             this.openFee = openFee;
             this.openSlippage = openSlippage;
+            this.hedged = hedged;
+            this.spotNotional = spotNotional;
+            this.spotOpenFee = spotOpenFee;
+            this.spotOpenSlippage = spotOpenSlippage;
         }
 
         BigDecimal unrealizedPnl(BigDecimal currentPrice) {
+            return futuresPricePnl(currentPrice).add(hedgePricePnl(currentPrice));
+        }
+
+        BigDecimal futuresPricePnl(BigDecimal currentPrice) {
             BigDecimal priceReturn = currentPrice.subtract(entryPrice).divide(entryPrice, 8, RoundingMode.HALF_UP);
             if ("SHORT".equals(side)) {
                 priceReturn = priceReturn.negate();
@@ -741,15 +877,38 @@ public class FundingBacktestEngine {
             return notional.multiply(priceReturn);
         }
 
+        BigDecimal hedgePricePnl(BigDecimal currentPrice) {
+            if (!hedged || spotNotional.compareTo(BigDecimal.ZERO) <= 0) {
+                return BigDecimal.ZERO;
+            }
+            BigDecimal priceReturn = currentPrice.subtract(entryPrice).divide(entryPrice, 8, RoundingMode.HALF_UP);
+            return spotNotional.multiply(priceReturn);
+        }
+
         BigDecimal unrealizedPnlRatio(BigDecimal currentPrice) {
             if (leverage <= 0) {
                 return BigDecimal.ZERO;
             }
-            BigDecimal margin = notional.divide(BigDecimal.valueOf(leverage), 8, RoundingMode.HALF_UP);
+            BigDecimal margin = capitalUsed();
             if (BigDecimal.ZERO.compareTo(margin) >= 0) {
                 return BigDecimal.ZERO;
             }
             return unrealizedPnl(currentPrice).divide(margin, 8, RoundingMode.HALF_UP);
+        }
+
+        BigDecimal totalOpenFee() {
+            return openFee.add(spotOpenFee);
+        }
+
+        BigDecimal totalOpenSlippage() {
+            return openSlippage.add(spotOpenSlippage);
+        }
+
+        BigDecimal capitalUsed() {
+            if (leverage <= 0) {
+                return spotNotional;
+            }
+            return notional.divide(BigDecimal.valueOf(leverage), 8, RoundingMode.HALF_UP).add(spotNotional);
         }
     }
 
@@ -766,10 +925,16 @@ public class FundingBacktestEngine {
     private static class MarketStateDecision {
         private final boolean accepted;
         private final String reason;
+        private final boolean trackHypothetical;
 
         private MarketStateDecision(boolean accepted, String reason) {
+            this(accepted, reason, true);
+        }
+
+        private MarketStateDecision(boolean accepted, String reason, boolean trackHypothetical) {
             this.accepted = accepted;
             this.reason = reason;
+            this.trackHypothetical = trackHypothetical;
         }
 
         static MarketStateDecision accepted() {
@@ -778,6 +943,10 @@ public class FundingBacktestEngine {
 
         static MarketStateDecision rejected(String reason) {
             return new MarketStateDecision(false, reason);
+        }
+
+        static MarketStateDecision rejected(String reason, boolean trackHypothetical) {
+            return new MarketStateDecision(false, reason, trackHypothetical);
         }
     }
 }
