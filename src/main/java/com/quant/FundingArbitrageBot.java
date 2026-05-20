@@ -64,6 +64,7 @@ public class FundingArbitrageBot {
     
     // ========== 风控熔断机制 ==========
     private volatile int consecutiveLosses = 0;  // 连续亏损次数
+    private volatile LocalDateTime pauseUntilTime = null;  // 暂停开仓直到该时间
     private volatile BigDecimal dailyPnl = BigDecimal.ZERO;  // 当日盈亏
     private volatile LocalDateTime dailyPnlDate = LocalDateTime.now();
     private volatile BigDecimal totalPnl = BigDecimal.ZERO;
@@ -499,6 +500,17 @@ public class FundingArbitrageBot {
         return riskManager.isExposureAcceptable(positions, newSide, accountBalance);
     }
     private boolean isTradingAllowed() {
+        // 0. 检查是否在暂停期内
+        if (pauseUntilTime != null && LocalDateTime.now().isBefore(pauseUntilTime)) {
+            long remainingMinutes = java.time.Duration.between(LocalDateTime.now(), pauseUntilTime).toMinutes();
+            log.warn("⏸️  连续亏损保护中，暂停开仓，剩余 {} 分钟", remainingMinutes);
+            return false;
+        } else if (pauseUntilTime != null) {
+            // 暂停期已过，重置
+            pauseUntilTime = null;
+            log.info("▶️  连续亏损保护期已结束，恢复开仓");
+        }
+
         // 1. 连续亏损熔断
         if (consecutiveLosses >= Config.MAX_CONSECUTIVE_LOSSES) {
             log.warn("🚨 连续亏损{}次触发熔断，暂停开仓", consecutiveLosses);
@@ -528,6 +540,19 @@ public class FundingArbitrageBot {
         totalPnl = totalPnl.add(pnl);  // ✅ 修复：平仓盈亏也要计入总收益
         if (pnl.compareTo(BigDecimal.ZERO) < 0) {
             consecutiveLosses++;
+            // ========== 连续亏损暂停保护 ==========
+            if (consecutiveLosses >= Config.PAUSE_AFTER_CONSECUTIVE_LOSSES) {
+                pauseUntilTime = LocalDateTime.now().plusNanos(Config.CONSECUTIVE_LOSS_PAUSE_MS * 1_000_000);
+                long pauseHours = Config.CONSECUTIVE_LOSS_PAUSE_MS / 3600000;
+                log.error("🚨 连续亏损{}次，触发保护机制，暂停开仓{}小时", consecutiveLosses, pauseHours);
+                // 推送通知
+                if (feishuNotifier != null) {
+                    feishuNotifier.sendAlert(String.format(
+                        "🚨 连续亏损保护触发\n连续亏损: %d次\n暂停时长: %d小时\n暂停至: %s",
+                        consecutiveLosses, pauseHours, pauseUntilTime.format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+                    ), null);
+                }
+            }
         } else {
             consecutiveLosses = 0;
         }

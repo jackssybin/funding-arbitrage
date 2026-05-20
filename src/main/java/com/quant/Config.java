@@ -233,7 +233,18 @@ public class Config {
     );
 
     public static final int MAX_CONSECUTIVE_LOSSES = Integer.parseInt(
-            getEnv("MAX_CONSECUTIVE_LOSSES", "3")
+            getEnv("MAX_CONSECUTIVE_LOSSES", "2")
+    );
+
+    // ========== 连续亏损暂停保护 ==========
+    // 连续N次亏损后暂停开仓
+    public static final int PAUSE_AFTER_CONSECUTIVE_LOSSES = Integer.parseInt(
+            getEnv("PAUSE_AFTER_CONSECUTIVE_LOSSES", "2")
+    );
+
+    // 连续亏损后暂停时长（毫秒，默认4小时）
+    public static final long CONSECUTIVE_LOSS_PAUSE_MS = Long.parseLong(
+            getEnv("CONSECUTIVE_LOSS_PAUSE_MS", "14400000")
     );
 
     public static final BigDecimal MAX_DAILY_LOSS_AMOUNT = new BigDecimal(
@@ -255,11 +266,11 @@ public class Config {
     );
 
     public static final BigDecimal STOP_LOSS_RATIO = new BigDecimal(
-            getEnv("STOP_LOSS_RATIO", "0.05")
+            getEnv("STOP_LOSS_RATIO", "0.08")
     );
 
     public static final BigDecimal TAKE_PROFIT_RATIO = new BigDecimal(
-            getEnv("TAKE_PROFIT_RATIO", "0.08")
+            getEnv("TAKE_PROFIT_RATIO", "0.10")
     );
 
     // ========== 新增：同币种止损后冷却期（毫秒，默认2小时）==========

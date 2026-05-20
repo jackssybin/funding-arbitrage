@@ -257,8 +257,9 @@ public class DailyReporter {
         report.append("- 运行时长: 自启动至今 ").append(startBalance == null ? "N/A" : "正常运行").append("\n");
         report.append("- 策略版本: v2.5\n");
         report.append("- 开仓阈值: 0.15%\n");
-        report.append("- 止损比例: 2%\n");
-        report.append("- 止盈比例: 3%\n");
+        report.append("- 止损比例: 8%\n");
+        report.append("- 止盈比例: 10%\n");
+        report.append("- 连续亏损保护: 2次亏损后暂停4小时\n");
         report.append("\n");
 
         // 明日计划
