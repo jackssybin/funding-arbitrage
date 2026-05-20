@@ -35,6 +35,11 @@ public class BinanceFuturesClient implements ExchangeClient {
     private final String baseUrl;
     private final String spotBaseUrl;
 
+    // ========== P0 修复：时间戳同步 ==========
+    // Binance API 要求时间戳偏差 < 1000ms
+    private long timeOffsetMs = 0;
+    private static final long RECV_WINDOW_MS = 10000;  // 10秒超时窗口
+
     // 模拟模式余额维护（解决余额永远10000的BUG）
     private BigDecimal simulatedBalance = new BigDecimal("10000");
 
@@ -58,6 +63,39 @@ public class BinanceFuturesClient implements ExchangeClient {
         this.secretKey = secretKey;
         this.baseUrl = Config.BINANCE_FUTURES_API;
         this.spotBaseUrl = Config.BINANCE_SPOT_API;
+        // ========== P0 修复：初始化时同步服务器时间 ==========
+        syncTimeOffset();
+    }
+
+    /**
+     * P0 修复：同步服务器时间偏移
+     * 避免 Binance -1021 错误："Timestamp for this request is outside of the recvWindow"
+     */
+    private void syncTimeOffset() {
+        try {
+            String url = spotBaseUrl + "/api/v3/time";
+            Request request = new Request.Builder().url(url).get().build();
+            try (Response response = httpClient.newCall(request).execute()) {
+                if (response.isSuccessful()) {
+                    String body = response.body().string();
+                    long serverTime = mapper.readTree(body).path("serverTime").asLong();
+                    long localTime = System.currentTimeMillis();
+                    this.timeOffsetMs = serverTime - localTime;
+                    log.info("⏰ Binance 时间同步完成：本地={}, 服务器={}, 偏移={}ms", 
+                            localTime, serverTime, timeOffsetMs);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("⚠️  Binance 时间同步失败，使用本地时间: {}", e.getMessage());
+            this.timeOffsetMs = 0;
+        }
+    }
+
+    /**
+     * 获取同步后的时间戳
+     */
+    private long getSyncedTimestamp() {
+        return System.currentTimeMillis() + timeOffsetMs;
     }
 
     @Override
@@ -761,8 +799,9 @@ public class BinanceFuturesClient implements ExchangeClient {
             // 模拟模式：返回合约余额的80%作为现货余额
             return getBalance().multiply(new BigDecimal("0.8"));
         }
-        long timestamp = System.currentTimeMillis();
-        String params = "timestamp=" + timestamp;
+        // ========== P0 修复：使用同步后的时间戳 + recvWindow ==========
+        long timestamp = getSyncedTimestamp();
+        String params = "recvWindow=" + RECV_WINDOW_MS + "&timestamp=" + timestamp;
         String signature = sign(params);
         String url = spotBaseUrl + "/api/v3/account?" + params + "&signature=" + signature;
 
@@ -802,7 +841,7 @@ public class BinanceFuturesClient implements ExchangeClient {
             log.info("[模拟模式] Binance 现货买入 {} 数量 {}", symbol, quantity);
             return "BINANCE_SIM_SPOT_BUY_" + System.currentTimeMillis();
         }
-        return executeSpotMarketOrder(symbol, "BUY", quantity);
+        return executeSpotMarketOrder(symbol, "BUY", quantity).getOrderId();
     }
     
     /**
@@ -814,20 +853,48 @@ public class BinanceFuturesClient implements ExchangeClient {
             log.info("[模拟模式] Binance 现货卖出 {} 数量 {}", symbol, quantity);
             return "BINANCE_SIM_SPOT_SELL_" + System.currentTimeMillis();
         }
+        return executeSpotMarketOrder(symbol, "SELL", quantity).getOrderId();
+    }
+
+    /** ========== P2 修复：现货买入返回完整成交报告 ========== */
+    @Override
+    public TradeExecutionReport buySpotWithReport(String symbol, BigDecimal quantity) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            log.info("[模拟模式] Binance 现货买入 {} 数量 {}", symbol, quantity);
+            TradeExecutionReport report = new TradeExecutionReport(symbol, "BINANCE_SIM_SPOT_BUY_" + System.currentTimeMillis());
+            BigDecimal price = getCurrentPrice(symbol);
+            report.addFill(price, quantity, price.multiply(quantity).multiply(Config.SPOT_TAKER_FEE_RATE), "USDT", BigDecimal.ZERO, "sim");
+            return report;
+        }
+        return executeSpotMarketOrder(symbol, "BUY", quantity);
+    }
+
+    /** ========== P2 修复：现货卖出返回完整成交报告 ========== */
+    @Override
+    public TradeExecutionReport sellSpotWithReport(String symbol, BigDecimal quantity) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            log.info("[模拟模式] Binance 现货卖出 {} 数量 {}", symbol, quantity);
+            TradeExecutionReport report = new TradeExecutionReport(symbol, "BINANCE_SIM_SPOT_SELL_" + System.currentTimeMillis());
+            BigDecimal price = getCurrentPrice(symbol);
+            report.addFill(price, quantity, price.multiply(quantity).multiply(Config.SPOT_TAKER_FEE_RATE), "USDT", BigDecimal.ZERO, "sim");
+            return report;
+        }
         return executeSpotMarketOrder(symbol, "SELL", quantity);
     }
 
-    private String executeSpotMarketOrder(String symbol, String side, BigDecimal quantity) throws IOException {
+    private TradeExecutionReport executeSpotMarketOrder(String symbol, String side, BigDecimal quantity) throws IOException {
         if (quantity == null || quantity.compareTo(BigDecimal.ZERO) <= 0) {
             throw new IOException("Binance spot " + side + " quantity must be positive: " + quantity);
         }
 
-        long timestamp = System.currentTimeMillis();
+        // ========== P0 修复：使用同步后的时间戳 + recvWindow ==========
+        long timestamp = getSyncedTimestamp();
         String params = "symbol=" + symbol
                 + "&side=" + side
                 + "&type=MARKET"
                 + "&quantity=" + quantity.toPlainString()
                 + "&newOrderRespType=FULL"
+                + "&recvWindow=" + RECV_WINDOW_MS
                 + "&timestamp=" + timestamp;
         String signature = sign(params);
         String url = spotBaseUrl + "/api/v3/order?" + params + "&signature=" + signature;
@@ -854,7 +921,7 @@ public class BinanceFuturesClient implements ExchangeClient {
                     report.getAveragePrice().setScale(8, RoundingMode.HALF_UP),
                     report.getFee().setScale(8, RoundingMode.HALF_UP),
                     report.getFeeAsset());
-            return orderId;
+            return report;
         }
     }
 

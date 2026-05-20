@@ -66,6 +66,10 @@ public class TradeExecutionReport {
         return orderIds;
     }
 
+    public String getOrderId() {
+        return orderIds;
+    }
+
     public BigDecimal getExecutedQuantity() {
         return executedQuantity;
     }
@@ -96,5 +100,25 @@ public class TradeExecutionReport {
 
     public boolean isEstimated() {
         return estimated;
+    }
+
+    /**
+     * ========== P2 修复：获取以 USDT 计价的总手续费 ==========
+     * 如果手续费币种是交易对的基础币（如BTC），则用成交价换算为 USDT
+     */
+    public BigDecimal getTotalFeeUsdtValue() {
+        if (fee == null || fee.compareTo(BigDecimal.ZERO) <= 0) {
+            return BigDecimal.ZERO;
+        }
+        // 如果手续费已经是 USDT 或 U本位，直接返回
+        if ("USDT".equals(feeAsset) || "USDC".equals(feeAsset) || "BUSD".equals(feeAsset)) {
+            return fee;
+        }
+        // 如果手续费是基础币，用成交价格换算
+        if (averagePrice != null && averagePrice.compareTo(BigDecimal.ZERO) > 0) {
+            return fee.multiply(averagePrice);
+        }
+        // fallback: 假设为 USDT
+        return fee;
     }
 }

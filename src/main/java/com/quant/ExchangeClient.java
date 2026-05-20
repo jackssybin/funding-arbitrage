@@ -98,14 +98,29 @@ public interface ExchangeClient {
     /** 现货卖出 */
     String sellSpot(String symbol, BigDecimal quantity) throws IOException;
 
-    /** 开现货持仓（默认调用 buySpot） */
-    default void openSpotPosition(String symbol, BigDecimal quantity) throws IOException {
-        buySpot(symbol, quantity);
+    /** ========== P2 修复：现货买入并返回成交报告（含真实手续费） ========== */
+    default TradeExecutionReport buySpotWithReport(String symbol, BigDecimal quantity) throws IOException {
+        String orderId = buySpot(symbol, quantity);
+        // 默认实现：只返回 orderId，不包含手续费
+        // 各交易所客户端应覆盖此方法返回完整成交报告
+        return new TradeExecutionReport(symbol, orderId);
     }
 
-    /** 平现货持仓（默认调用 sellSpot） */
-    default void closeSpotPosition(String symbol, BigDecimal quantity) throws IOException {
-        sellSpot(symbol, quantity);
+    /** ========== P2 修复：现货卖出并返回成交报告（含真实手续费） ========== */
+    default TradeExecutionReport sellSpotWithReport(String symbol, BigDecimal quantity) throws IOException {
+        String orderId = sellSpot(symbol, quantity);
+        // 默认实现：只返回 orderId，不包含手续费
+        return new TradeExecutionReport(symbol, orderId);
+    }
+
+    /** 开现货持仓（默认调用 buySpotWithReport） */
+    default TradeExecutionReport openSpotPosition(String symbol, BigDecimal quantity) throws IOException {
+        return buySpotWithReport(symbol, quantity);
+    }
+
+    /** 平现货持仓（默认调用 sellSpotWithReport） */
+    default TradeExecutionReport closeSpotPosition(String symbol, BigDecimal quantity) throws IOException {
+        return sellSpotWithReport(symbol, quantity);
     }
 
     // ===== 工具 =====

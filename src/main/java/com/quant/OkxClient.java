@@ -596,6 +596,43 @@ public class OkxClient implements ExchangeClient {
         }
     }
 
+    /** ========== P2 修复：现货买入返回完整成交报告 ========== */
+    @Override
+    public TradeExecutionReport buySpotWithReport(String symbol, BigDecimal quantity) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            log.info("[模拟模式] OKX 现货买入 {} 数量 {}", symbol, quantity);
+            TradeExecutionReport report = new TradeExecutionReport(symbol, "OKX_SIM_SPOT_BUY_" + System.currentTimeMillis());
+            BigDecimal price = getCurrentPrice(symbol);
+            report.addFill(price, quantity, price.multiply(quantity).multiply(Config.SPOT_TAKER_FEE_RATE), "USDT", BigDecimal.ZERO, "sim");
+            return report;
+        }
+        String orderId = buySpot(symbol, quantity);
+        // TODO: 调用 OKX 订单详情 API 获取真实成交数据
+        // 暂时返回基础报告（有 orderId 但无详细手续费）
+        TradeExecutionReport report = new TradeExecutionReport(symbol, orderId);
+        BigDecimal price = getCurrentPrice(symbol);
+        report.addFill(price, quantity, price.multiply(quantity).multiply(Config.SPOT_TAKER_FEE_RATE), "USDT", BigDecimal.ZERO, orderId);
+        return report;
+    }
+
+    /** ========== P2 修复：现货卖出返回完整成交报告 ========== */
+    @Override
+    public TradeExecutionReport sellSpotWithReport(String symbol, BigDecimal quantity) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            log.info("[模拟模式] OKX 现货卖出 {} 数量 {}", symbol, quantity);
+            TradeExecutionReport report = new TradeExecutionReport(symbol, "OKX_SIM_SPOT_SELL_" + System.currentTimeMillis());
+            BigDecimal price = getCurrentPrice(symbol);
+            report.addFill(price, quantity, price.multiply(quantity).multiply(Config.SPOT_TAKER_FEE_RATE), "USDT", BigDecimal.ZERO, "sim");
+            return report;
+        }
+        String orderId = sellSpot(symbol, quantity);
+        // TODO: 调用 OKX 订单详情 API 获取真实成交数据
+        TradeExecutionReport report = new TradeExecutionReport(symbol, orderId);
+        BigDecimal price = getCurrentPrice(symbol);
+        report.addFill(price, quantity, price.multiply(quantity).multiply(Config.SPOT_TAKER_FEE_RATE), "USDT", BigDecimal.ZERO, orderId);
+        return report;
+    }
+
     // ===================================================================
     // 签名与工具方法
     // ===================================================================

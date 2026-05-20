@@ -652,8 +652,10 @@ public class FundingArbitrageBot {
             }
             return sufficient;
         } catch (Exception e) {
-            log.warn("⚠️  获取现货余额失败，暂停现货对冲开仓: {}", e.getMessage());
-            return false;
+            // ========== P1 修复：API失败时仍然允许开仓，只告警不暂停 ==========
+            // 网络波动是常有的事，一次失败就错过机会不值得
+            log.warn("⚠️  获取现货余额失败，假设资金充足继续开仓: {}", e.getMessage());
+            return true;
         }
     }
 
@@ -1150,22 +1152,36 @@ public class FundingArbitrageBot {
                 
                 if (spotAlignedQuantity.compareTo(BigDecimal.ZERO) > 0) {
                     try {
-                        // 现货下单（市价买入）
+                        // ========== P2 修复：使用实际现货成交报告（含真实手续费） ==========
                         log.info("📈 现货买入: {} {}", spotAlignedQuantity, symbol);
-                        exchangeClient.openSpotPosition(symbol, spotAlignedQuantity);
+                        TradeExecutionReport spotReport = exchangeClient.openSpotPosition(symbol, spotAlignedQuantity);
                         
-                        // 获取现货成交价格（简化：使用当前价格）
-                        BigDecimal spotExecutionPrice = currentPrice;
-                        BigDecimal spotOpenNotional = spotExecutionPrice.multiply(spotAlignedQuantity);
-                        spotOpenCost = estimatedSpotOneWayCost(spotOpenNotional);
+                        // 使用实际成交价格和手续费
+                        BigDecimal spotExecutionPrice = spotReport.getAveragePrice().compareTo(BigDecimal.ZERO) > 0 
+                                ? spotReport.getAveragePrice() : currentPrice;
+                        BigDecimal spotExecutedQty = spotReport.getExecutedQuantity().compareTo(BigDecimal.ZERO) > 0
+                                ? spotReport.getExecutedQuantity() : spotAlignedQuantity;
+                        BigDecimal spotOpenNotional = spotExecutionPrice.multiply(spotExecutedQty);
+                        
+                        // 使用实际手续费，而不是估算值
+                        spotOpenCost = spotReport.getTotalFeeUsdtValue();
+                        if (spotOpenCost.compareTo(BigDecimal.ZERO) <= 0) {
+                            spotOpenCost = estimatedSpotOneWayCost(spotOpenNotional);
+                            log.warn("⚠️  现货手续费获取失败，使用估算值: {}", spotOpenCost);
+                        } else {
+                            log.info("💰 现货实际成交: 均价={}, 数量={}, 手续费={} USDT", 
+                                    spotExecutionPrice.setScale(8, RoundingMode.HALF_UP),
+                                    spotExecutedQty.setScale(8, RoundingMode.HALF_UP),
+                                    spotOpenCost.setScale(6, RoundingMode.HALF_UP));
+                        }
                         
                         // 记录带现货对冲的持仓
                         position.openWithHedge(executedQuantity, executionPrice, 
-                                spotAlignedQuantity, spotExecutionPrice, 
+                                spotExecutedQty, spotExecutionPrice, 
                                 fundingRate, side, Config.SPOT_HEDGE_RATIO);
                         
-                        log.info("✅ 现货对冲开仓完成: 合约 {} {}, 现货 {} {}", 
-                                side, executedQuantity, "买入", spotAlignedQuantity);
+                        log.info("✅ 现货对冲开仓完成: 合约 {} {}, 现货买入 {}", 
+                                side, executedQuantity, spotExecutedQty);
                     } catch (Exception e) {
                         log.error("❌ 现货下单失败，合约持仓已开，现货未开！需要手动处理: {}", e.getMessage());
                         // 降级为纯合约模式
@@ -1352,10 +1368,71 @@ public class FundingArbitrageBot {
 
         try {
             BigDecimal alignedQuantity = precision.alignQuantity(symbol, position.getPositionSize());
-
             String side = position.getPositionSide();
+            
+            // ========== 提前获取价格（用于现货平仓计算） ==========
+            BigDecimal closePrice = BigDecimal.ZERO;
+            try {
+                closePrice = exchangeClient.getCurrentPrice(symbol);
+            } catch (Exception e) {
+                log.warn("⚠️  获取当前价格失败: {}", e.getMessage());
+                closePrice = position.getEntryPrice();
+            }
 
-            // ========== 先平合约，避免先卖出现货后留下裸合约风险 ==========
+            // ========== P0 修复：先平现货，后平合约（避免裸仓风险） ==========
+            // 顺序说明：先平现货 → 此时只有合约空仓（本来就是我们的主仓位）
+            //          再平合约 → 完全平仓
+            // 反过来先平合约的话，会留下现货多仓裸奔，风险更大！
+            BigDecimal spotPnl = BigDecimal.ZERO;
+            BigDecimal spotCloseCost = BigDecimal.ZERO;
+            if (isHedged && position.getSpotPositionSize().compareTo(BigDecimal.ZERO) > 0) {
+                BigDecimal spotQuantity = position.getSpotPositionSize();
+                BigDecimal spotAlignedQuantity = precision.alignSpotQuantity(symbol, spotQuantity);
+                
+                try {
+                    // ========== P2 修复：使用实际现货成交报告（含真实手续费） ==========
+                    log.info("📉 现货卖出平仓: {} {}", spotAlignedQuantity, symbol);
+                    TradeExecutionReport spotReport = exchangeClient.closeSpotPosition(symbol, spotAlignedQuantity);
+                    
+                    // 使用实际成交价格计算盈亏和手续费
+                    BigDecimal spotExecutionPrice = spotReport.getAveragePrice().compareTo(BigDecimal.ZERO) > 0
+                            ? spotReport.getAveragePrice() : closePrice;
+                    BigDecimal spotExecutedQty = spotReport.getExecutedQuantity().compareTo(BigDecimal.ZERO) > 0
+                            ? spotReport.getExecutedQuantity() : spotAlignedQuantity;
+                    
+                    // 使用实际成交价格计算现货盈亏
+                    BigDecimal spotEntryPrice = position.getSpotEntryPrice();
+                    if (spotEntryPrice != null && spotEntryPrice.compareTo(BigDecimal.ZERO) > 0) {
+                        // 现货实际盈亏 = (平仓价 - 开仓价) * 数量
+                        BigDecimal priceReturn = spotExecutionPrice.subtract(spotEntryPrice)
+                                .divide(spotEntryPrice, 12, RoundingMode.HALF_UP);
+                        BigDecimal spotNotional = spotEntryPrice.multiply(spotExecutedQty);
+                        spotPnl = spotNotional.multiply(priceReturn);
+                    } else {
+                        //  fallback: 使用原来的计算方式
+                        spotPnl = position.getSpotPnl(closePrice);
+                    }
+                    
+                    // 使用实际手续费
+                    spotCloseCost = spotReport.getTotalFeeUsdtValue();
+                    if (spotCloseCost.compareTo(BigDecimal.ZERO) <= 0) {
+                        spotCloseCost = estimatedSpotOneWayCost(closePrice.multiply(spotAlignedQuantity));
+                    }
+                    
+                    log.info("💰 现货实际平仓: 均价={}, 数量={}, 盈亏={} USDT, 手续费={} USDT",
+                            spotExecutionPrice.setScale(8, RoundingMode.HALF_UP),
+                            spotExecutedQty.setScale(8, RoundingMode.HALF_UP),
+                            spotPnl.setScale(6, RoundingMode.HALF_UP),
+                            spotCloseCost.setScale(6, RoundingMode.HALF_UP));
+                    log.info("✅ 现货平仓成功");
+                } catch (Exception e) {
+                    log.error("❌ 现货平仓失败！合约已平但现货未平，需要手动处理: {}", e.getMessage());
+                    // 估算手续费
+                    spotCloseCost = estimatedSpotOneWayCost(closePrice.multiply(spotAlignedQuantity));
+                }
+            }
+
+            // ========== 后平合约 ==========
             AtomicTransactionManager.TxResult result = txManager.atomicClosePosition(symbol, alignedQuantity, side);
             if (!result.isSuccess()) {
                 try {
@@ -1371,11 +1448,14 @@ public class FundingArbitrageBot {
                 }
             }
 
-            BigDecimal closePrice = position.getMarkPrice() != null ? position.getMarkPrice() : position.getEntryPrice();
+            // 合约平仓后再次获取确认价格（现货平仓时已获取）
             try {
-                closePrice = exchangeClient.getCurrentPrice(symbol);
+                BigDecimal newPrice = exchangeClient.getCurrentPrice(symbol);
+                if (newPrice != null && newPrice.compareTo(BigDecimal.ZERO) > 0) {
+                    closePrice = newPrice;
+                }
             } catch (Exception e) {
-                log.warn("⚠️  获取 {} 最新价格失败，使用已有浮盈亏计算平仓收益: {}", symbol, e.getMessage());
+                log.warn("⚠️  获取 {} 最新价格失败，使用已有价格: {}", symbol, e.getMessage());
             }
 
             // 计算平仓盈亏（浮盈浮亏实现化）
@@ -1387,17 +1467,6 @@ public class FundingArbitrageBot {
             BigDecimal executedQuantity = executionQuantityOrFallback(execution, alignedQuantity);
             BigDecimal executedNotional = executionNotionalOrFallback(execution, closePrice, executedQuantity);
             position.updateUnrealizedPnl(closePrice);
-
-            BigDecimal spotPnl = BigDecimal.ZERO;
-            BigDecimal spotCloseCost = BigDecimal.ZERO;
-            if (isHedged && position.getSpotPositionSize().compareTo(BigDecimal.ZERO) > 0) {
-                BigDecimal spotAlignedQuantity = precision.alignSpotQuantity(symbol, position.getSpotPositionSize());
-                spotPnl = position.getSpotPnl(closePrice);
-                spotCloseCost = estimatedSpotOneWayCost(closePrice.multiply(spotAlignedQuantity));
-                log.info("📉 现货卖出平仓: {} {}", spotAlignedQuantity, symbol);
-                exchangeClient.closeSpotPosition(symbol, spotAlignedQuantity);
-                log.info("✅ 现货平仓成功");
-            }
 
             BigDecimal closePnl = BigDecimal.ZERO;
             if (position.getUnrealizedPnl() != null) {
