@@ -79,6 +79,58 @@ public class OkxClient implements ExchangeClient {
         return "OKX";
     }
 
+    private TradeExecutionReport getSpotExecutionReport(String symbol, String orderId, BigDecimal fallbackQuantity)
+            throws IOException {
+        String instId = toOkxSpotInstId(symbol);
+        TradeExecutionReport report = new TradeExecutionReport(symbol, orderId);
+
+        String fillsPath = "/api/v5/trade/fills-history?instType=SPOT&instId=" + instId + "&ordId=" + orderId;
+        Request fillsRequest = buildSignedRequest("GET", fillsPath, "");
+        try (Response response = httpClient.newCall(fillsRequest).execute()) {
+            String body = checkResponse(response, "query OKX spot fills");
+            JsonNode fills = mapper.readTree(body).get("data");
+            if (fills != null) {
+                for (JsonNode fill : fills) {
+                    report.addFill(
+                            readDecimal(fill, "fillPx", "0"),
+                            readDecimal(fill, "fillSz", "0"),
+                            readDecimal(fill, "fee", "0"),
+                            fill.hasNonNull("feeCcy") ? fill.get("feeCcy").asText() : "USDT",
+                            BigDecimal.ZERO,
+                            fill.hasNonNull("tradeId") ? fill.get("tradeId").asText() : null
+                    );
+                }
+            }
+        }
+
+        if (report.getExecutedQuantity().compareTo(BigDecimal.ZERO) > 0) {
+            return report;
+        }
+
+        String orderPath = "/api/v5/trade/order?instId=" + instId + "&ordId=" + orderId;
+        Request orderRequest = buildSignedRequest("GET", orderPath, "");
+        try (Response response = httpClient.newCall(orderRequest).execute()) {
+            String body = checkResponse(response, "query OKX spot order");
+            JsonNode data = mapper.readTree(body).get("data");
+            if (data != null && data.size() > 0) {
+                JsonNode order = data.get(0);
+                BigDecimal avgPx = readDecimal(order, "avgPx", "0");
+                BigDecimal accFillSz = readDecimal(order, "accFillSz",
+                        fallbackQuantity == null ? "0" : fallbackQuantity.toPlainString());
+                BigDecimal fee = readDecimal(order, "fee", "0");
+                String feeCcy = order.hasNonNull("feeCcy") ? order.get("feeCcy").asText() : "USDT";
+                if (avgPx.compareTo(BigDecimal.ZERO) > 0 && accFillSz.compareTo(BigDecimal.ZERO) > 0) {
+                    report.addFill(avgPx, accFillSz, fee, feeCcy, BigDecimal.ZERO, orderId);
+                }
+            }
+        }
+
+        if (report.getExecutedQuantity().compareTo(BigDecimal.ZERO) <= 0) {
+            throw new IOException("OKX spot order " + orderId + " has no confirmed fills");
+        }
+        return report;
+    }
+
     // ===================================================================
     // 行情接口（无签名）
     // ===================================================================
@@ -530,7 +582,7 @@ public class OkxClient implements ExchangeClient {
         }
 
         String path = "/api/v5/account/balance?ccy=USDT";
-        Request request = buildSignedRequest("GET", path, null);
+        Request request = buildSignedRequest("GET", path, "");
         try (Response response = httpClient.newCall(request).execute()) {
             String body = checkResponse(response, "获取现货余额");
             JsonNode json = mapper.readTree(body);
@@ -561,7 +613,8 @@ public class OkxClient implements ExchangeClient {
         String instId = toOkxSpotInstId(symbol);
         String path = "/api/v5/trade/order";
         String bodyStr = String.format(
-                "{\"instId\":\"%s\",\"tdMode\":\"cash\",\"side\":\"buy\",\"ordType\":\"market\",\"sz\":\"%s\"}",
+                "{\"instId\":\"%s\",\"tdMode\":\"cash\",\"side\":\"buy\",\"ordType\":\"market\","
+                        + "\"sz\":\"%s\",\"tgtCcy\":\"base_ccy\"}",
                 instId, quantity.toPlainString());
 
         Request request = buildSignedRequest("POST", path, bodyStr);
@@ -607,12 +660,7 @@ public class OkxClient implements ExchangeClient {
             return report;
         }
         String orderId = buySpot(symbol, quantity);
-        // TODO: 调用 OKX 订单详情 API 获取真实成交数据
-        // 暂时返回基础报告（有 orderId 但无详细手续费）
-        TradeExecutionReport report = new TradeExecutionReport(symbol, orderId);
-        BigDecimal price = getCurrentPrice(symbol);
-        report.addFill(price, quantity, price.multiply(quantity).multiply(Config.SPOT_TAKER_FEE_RATE), "USDT", BigDecimal.ZERO, orderId);
-        return report;
+        return getSpotExecutionReport(symbol, orderId, quantity);
     }
 
     /** ========== P2 修复：现货卖出返回完整成交报告 ========== */
@@ -626,11 +674,7 @@ public class OkxClient implements ExchangeClient {
             return report;
         }
         String orderId = sellSpot(symbol, quantity);
-        // TODO: 调用 OKX 订单详情 API 获取真实成交数据
-        TradeExecutionReport report = new TradeExecutionReport(symbol, orderId);
-        BigDecimal price = getCurrentPrice(symbol);
-        report.addFill(price, quantity, price.multiply(quantity).multiply(Config.SPOT_TAKER_FEE_RATE), "USDT", BigDecimal.ZERO, orderId);
-        return report;
+        return getSpotExecutionReport(symbol, orderId, quantity);
     }
 
     // ===================================================================
@@ -659,8 +703,9 @@ public class OkxClient implements ExchangeClient {
      * OKX 签名 = Base64(HMAC-SHA256(timestamp + method + requestPath + body))
      */
     private Request buildSignedRequest(String method, String path, String body) {
+        String requestBody = body == null ? "" : body;
         String timestamp = getIsoTimestamp();
-        String preHash = timestamp + method.toUpperCase() + path + body;
+        String preHash = timestamp + method.toUpperCase() + path + requestBody;
         String sign = base64HmacSha256(preHash, secretKey);
 
         Request.Builder builder = new Request.Builder()
@@ -677,7 +722,7 @@ public class OkxClient implements ExchangeClient {
         }
 
         if ("POST".equalsIgnoreCase(method)) {
-            RequestBody rb = RequestBody.create(body, MediaType.parse("application/json"));
+            RequestBody rb = RequestBody.create(requestBody, MediaType.parse("application/json"));
             builder.post(rb);
         } else {
             builder.get();

@@ -83,6 +83,19 @@ class MarketDataServiceTest {
         assertFalse(service.isMarketStateAcceptableForEntry("BTCUSDT", client.currentRate));
     }
 
+    @Test
+    void rejectsEntryWhenLiveMarketSnapshotIsIncomplete() throws Exception {
+        FakeExchangeClient client = new FakeExchangeClient();
+        client.currentRate = new BigDecimal("0.0010");
+        client.predictedRate = new BigDecimal("0.0010");
+
+        MarketDataService service = new MarketDataService(client);
+        service.updateFundingRates(Collections.singletonList("BTCUSDT"));
+        service.update24hChanges(Collections.singletonList("BTCUSDT"));
+
+        assertFalse(service.isMarketStateAcceptableForEntry("BTCUSDT", client.currentRate));
+    }
+
     private static class FakeExchangeClient implements ExchangeClient {
         BigDecimal currentRate = BigDecimal.ZERO;
         BigDecimal predictedRate = BigDecimal.ZERO;

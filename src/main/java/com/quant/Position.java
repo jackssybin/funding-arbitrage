@@ -284,6 +284,20 @@ public class Position {
     }
 
     // ========== 现货对冲相关方法 ==========
+    public void markContractLegClosed() {
+        this.positionSize = BigDecimal.ZERO;
+        this.unrealizedPnl = BigDecimal.ZERO;
+        this.unrealizedPnlRatio = BigDecimal.ZERO;
+    }
+
+    public boolean isSpotOnlyAfterContractClose() {
+        return hasPosition
+                && hedged
+                && (positionSize == null || positionSize.compareTo(BigDecimal.ZERO) <= 0)
+                && spotPositionSize != null
+                && spotPositionSize.compareTo(BigDecimal.ZERO) > 0;
+    }
+
     public boolean isHedged() {
         return hedged;
     }

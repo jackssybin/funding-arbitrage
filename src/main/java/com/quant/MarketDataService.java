@@ -91,6 +91,10 @@ public class MarketDataService {
         return fundingRates;
     }
 
+    public LocalDateTime getLastRateUpdate() {
+        return lastRateUpdate;
+    }
+
     public boolean isExtremeMarket(String symbol, BigDecimal rate) {
         if (rate.compareTo(Config.MAX_NEGATIVE_RATE) < 0) {
             log.warn("⚠️  {} 费率 {}% 异常低，可能是极端行情，跳过做多",
@@ -127,27 +131,43 @@ public class MarketDataService {
             return false;
         }
         MarketSnapshot snapshot = marketSnapshots.get(symbol);
-        if (snapshot != null) {
-            BigDecimal spreadRatio = snapshot.spreadRatio();
-            if (spreadRatio.compareTo(Config.LIVE_MAX_BID_ASK_SPREAD_RATIO) > 0) {
-                log.warn("{} bid/ask spread too wide: {}%", symbol,
-                        spreadRatio.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
-                return false;
-            }
-            BigDecimal highLowRangeRatio = snapshot.highLowRangeRatio();
-            if (highLowRangeRatio.compareTo(Config.LIVE_MAX_HIGH_LOW_RANGE_RATIO) > 0) {
-                log.warn("{} 24h high/low range too wide: {}%", symbol,
-                        highLowRangeRatio.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
-                return false;
-            }
-            BigDecimal volumeSpikeRatio = volumeSpikeRatio(symbol);
-            if (volumeSpikeRatio.compareTo(Config.LIVE_MAX_VOLUME_SPIKE_RATIO) > 0) {
-                log.warn("{} 24h volume spike too high: {}x", symbol,
-                        volumeSpikeRatio.setScale(2, RoundingMode.HALF_UP));
-                return false;
-            }
+        if (!hasRequiredLiveMarketSnapshot(snapshot)) {
+            log.warn("{} live market snapshot is missing bid/ask, high/low or volume; reject entry", symbol);
+            return false;
+        }
+        BigDecimal spreadRatio = snapshot.spreadRatio();
+        if (spreadRatio.compareTo(Config.LIVE_MAX_BID_ASK_SPREAD_RATIO) > 0) {
+            log.warn("{} bid/ask spread too wide: {}%", symbol,
+                    spreadRatio.multiply(new BigDecimal("100")).setScale(4, RoundingMode.HALF_UP));
+            return false;
+        }
+        BigDecimal highLowRangeRatio = snapshot.highLowRangeRatio();
+        if (highLowRangeRatio.compareTo(Config.LIVE_MAX_HIGH_LOW_RANGE_RATIO) > 0) {
+            log.warn("{} 24h high/low range too wide: {}%", symbol,
+                    highLowRangeRatio.multiply(new BigDecimal("100")).setScale(2, RoundingMode.HALF_UP));
+            return false;
+        }
+        BigDecimal volumeSpikeRatio = volumeSpikeRatio(symbol);
+        if (volumeSpikeRatio.compareTo(Config.LIVE_MAX_VOLUME_SPIKE_RATIO) > 0) {
+            log.warn("{} 24h volume spike too high: {}x", symbol,
+                    volumeSpikeRatio.setScale(2, RoundingMode.HALF_UP));
+            return false;
         }
         return isRateTrendGood(symbol, currentRate);
+    }
+
+    private boolean hasRequiredLiveMarketSnapshot(MarketSnapshot snapshot) {
+        return snapshot != null
+                && isPositive(snapshot.lastPrice)
+                && isPositive(snapshot.high24h)
+                && isPositive(snapshot.low24h)
+                && isPositive(snapshot.volume24h)
+                && isPositive(snapshot.bidPrice)
+                && isPositive(snapshot.askPrice);
+    }
+
+    private boolean isPositive(BigDecimal value) {
+        return value != null && value.compareTo(BigDecimal.ZERO) > 0;
     }
 
     public boolean isRateTrendGood(String symbol, BigDecimal currentRate) {

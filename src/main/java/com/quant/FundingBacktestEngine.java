@@ -190,7 +190,9 @@ public class FundingBacktestEngine {
         if (config.hedgePositiveFundingOnly && !"SHORT".equals(side)) {
             return MarketStateDecision.rejected("UNSUPPORTED_HEDGE_DIRECTION", false);
         }
-        BigDecimal expectedFunding = config.notional.multiply(current.fundingRate.abs());
+        BigDecimal expectedFunding = config.notional
+                .multiply(current.fundingRate.abs())
+                .multiply(BigDecimal.valueOf(config.expectedFundingSettlements));
         BigDecimal expectedCost = config.roundTripFee(config.notional)
                 .add(config.roundTripSlippage(config.notional))
                 .add(config.roundTripSpotFee(config.spotNotional()))
@@ -688,6 +690,7 @@ public class FundingBacktestEngine {
         public BigDecimal spotTakerFeeRate = Config.BACKTEST_SPOT_TAKER_FEE_RATE;
         public BigDecimal spotSlippageRate = Config.BACKTEST_SPOT_SLIPPAGE_RATE;
         public BigDecimal minExpectedNetFundingAfterCosts = Config.BACKTEST_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS;
+        public int expectedFundingSettlements = Config.BACKTEST_EXPECTED_FUNDING_SETTLEMENTS;
 
         BigDecimal oneWayFee(BigDecimal notionalValue) {
             return notionalValue.multiply(takerFeeRate);

@@ -18,6 +18,8 @@ public class Config {
             .ignoreIfMissing()
             .load();
 
+    private static final String DEFAULT_LIVE_MARKET_STATE_FILTER_ENABLED = "true";
+
     // ========== 交易所选择 ==========
     /** 使用哪家交易所：binance 或 okx */
     public static final String EXCHANGE = getEnv("EXCHANGE", "binance").toLowerCase();
@@ -37,11 +39,11 @@ public class Config {
     // ========== 多币种配置 [功能1] ==========
     // 监控的交易对列表
     public static final List<String> TRADING_SYMBOLS = Arrays.asList(
-            getEnv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT").split(",")
+            getEnv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT").split(",")
     );
 
     public static final Set<String> EXCLUDED_SYMBOLS = parseStringSet(
-            getEnv("EXCLUDED_SYMBOLS", "")
+            getEnv("EXCLUDED_SYMBOLS", "SOLUSDT,XRPUSDT,DOGEUSDT")
     );
 
     public static final BigDecimal SYMBOL_MIN_BACKTEST_TOTAL_PNL = new BigDecimal(
@@ -49,11 +51,11 @@ public class Config {
     );
 
     public static final BigDecimal SYMBOL_MAX_BACKTEST_DRAWDOWN_USDT = new BigDecimal(
-            getEnv("SYMBOL_MAX_BACKTEST_DRAWDOWN_USDT", "500")
+            getEnv("SYMBOL_MAX_BACKTEST_DRAWDOWN_USDT", "250")
     );
 
     public static final BigDecimal SYMBOL_MIN_BACKTEST_WIN_RATE = new BigDecimal(
-            getEnv("SYMBOL_MIN_BACKTEST_WIN_RATE", "0.40")
+            getEnv("SYMBOL_MIN_BACKTEST_WIN_RATE", "0.55")
     );
 
     public static final int SYMBOL_MIN_BACKTEST_CLOSED_TRADES = Integer.parseInt(
@@ -125,7 +127,7 @@ public class Config {
     );
 
     public static final BigDecimal LIVE_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS = new BigDecimal(
-            getEnv("LIVE_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS", "0")
+            getEnv("LIVE_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS", "2.0")
     );
 
     public static final int LIVE_EXPECTED_FUNDING_SETTLEMENTS = Integer.parseInt(
@@ -169,6 +171,14 @@ public class Config {
             getEnv("SPOT_SLIPPAGE_RATE", "0.0005")
     );
 
+    public static final BigDecimal SPOT_HEDGE_MAX_DEVIATION_RATIO = new BigDecimal(
+            getEnv("SPOT_HEDGE_MAX_DEVIATION_RATIO", "0.10")
+    );
+
+    public static final BigDecimal SPOT_HEDGE_STOP_LOSS_RATIO = new BigDecimal(
+            getEnv("SPOT_HEDGE_STOP_LOSS_RATIO", "0.03")
+    );
+
     public static final int MIN_HOLDING_HOURS = Integer.parseInt(
             getEnv("MIN_HOLDING_HOURS", "8")
     );
@@ -198,12 +208,18 @@ public class Config {
             getEnv("BACKTEST_MIN_EXPECTED_NET_FUNDING_AFTER_COSTS", "0")
     );
 
+    public static final int BACKTEST_EXPECTED_FUNDING_SETTLEMENTS = Integer.parseInt(
+            getEnv("BACKTEST_EXPECTED_FUNDING_SETTLEMENTS",
+                    String.valueOf(LIVE_EXPECTED_FUNDING_SETTLEMENTS))
+    );
+
     public static final boolean BACKTEST_MARKET_STATE_FILTER_ENABLED = Boolean.parseBoolean(
-            getEnv("BACKTEST_MARKET_STATE_FILTER_ENABLED", "false")
+            getEnv("BACKTEST_MARKET_STATE_FILTER_ENABLED",
+                    DEFAULT_LIVE_MARKET_STATE_FILTER_ENABLED)
     );
 
     public static final boolean LIVE_MARKET_STATE_FILTER_ENABLED = Boolean.parseBoolean(
-            getEnv("LIVE_MARKET_STATE_FILTER_ENABLED", "true")
+            getEnv("LIVE_MARKET_STATE_FILTER_ENABLED", DEFAULT_LIVE_MARKET_STATE_FILTER_ENABLED)
     );
 
     public static final BigDecimal LIVE_MAX_HIGH_LOW_RANGE_RATIO = new BigDecimal(
