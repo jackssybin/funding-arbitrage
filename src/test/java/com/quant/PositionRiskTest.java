@@ -40,7 +40,13 @@ class PositionRiskTest {
 
         position.updateUnrealizedPnl(new BigDecimal("2949"));
 
-        // 亏损51时，如果是3倍杠杆 = 5.1% 触发；如果是2倍杠杆 = 3.4% 也触发
+        // 亏损51时，如果是3倍杠杆 = 5.1% 触发；如果是1倍杠杆 = 1.7%，则需要更低的价格才触发
+        // 计算刚好触发止损的价格：亏损 = 3000 * 0.03 / LEVERAGE = 90 / LEVERAGE
+        BigDecimal stopLossAmount = new BigDecimal("3000")
+                .multiply(new BigDecimal("0.03"))
+                .divide(BigDecimal.valueOf(Config.LEVERAGE), 6, java.math.RoundingMode.HALF_UP);
+        BigDecimal triggerPrice = new BigDecimal("3000").subtract(stopLossAmount);
+        position.updateUnrealizedPnl(triggerPrice); // 刚好在阈值触发
         assertTrue(position.isStopLossTriggered(new BigDecimal("0.03")));
     }
 

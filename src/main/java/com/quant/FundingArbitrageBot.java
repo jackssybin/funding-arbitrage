@@ -184,6 +184,8 @@ public class FundingArbitrageBot {
                 totalPnl = BigDecimal.valueOf(savedState.totalPnl);
                 totalTrades = savedState.totalTrades;
                 lastFundingIncomeQueryTime = savedState.lastFundingIncomeQueryTime;
+                // ✅ 修复：恢复 lastSettledHourUtc，防止重启后在同一个结算窗口内重复结算
+                lastSettledHourUtc = savedState.lastSettledHourUtc;
                 restoreFundingIncomeQueryTimes(savedState);
                 restorePositions(savedState);
                 log.info("✅ 已恢复历史收益: {} USDT, 交易次数: {}", savedState.totalPnl, savedState.totalTrades);
@@ -253,6 +255,9 @@ public class FundingArbitrageBot {
         log.info("💡 纯合约套利，每8小时结算一次资金费");
         log.info("");
 
+        long lastScheduledSave = System.currentTimeMillis();
+        final long SCHEDULED_SAVE_INTERVAL_MS = 15 * 60 * 1000L; // 15 分钟兜底保存
+
         while (true) {
             try {
                 LocalDateTime now = LocalDateTime.now();
@@ -268,6 +273,16 @@ public class FundingArbitrageBot {
                 checkRiskControl();
                 printCurrentStatus();
                 executeStrategy();
+
+                // ✅ 新增：定时兜底保存（每15分钟或每次主循环，防止异常退出丢数据）
+                if (System.currentTimeMillis() - lastScheduledSave >= SCHEDULED_SAVE_INTERVAL_MS) {
+                    persistence.saveState(positions, totalPnl, totalTrades,
+                            lastFundingIncomeQueryTime, new HashMap<>(lastFundingIncomeQueryTimes),
+                            lastSettledHourUtc);
+                    log.info("💾 定时状态保存完成");
+                    lastScheduledSave = System.currentTimeMillis();
+                }
+
                 sleep();
 
             } catch (Exception e) {
@@ -355,7 +370,8 @@ public class FundingArbitrageBot {
                 .orElse(lastFundingIncomeQueryTime);
         // 结算后保存状态
         persistence.saveState(positions, totalPnl, totalTrades,
-                lastFundingIncomeQueryTime, new HashMap<>(lastFundingIncomeQueryTimes));
+                lastFundingIncomeQueryTime, new HashMap<>(lastFundingIncomeQueryTimes),
+                lastSettledHourUtc);
     }
 
     private FundingIncomeResult getActualFundingIncome(Position position, BigDecimal currentRate, long endTime) {

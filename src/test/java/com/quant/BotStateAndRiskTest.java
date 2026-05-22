@@ -160,8 +160,12 @@ class BotStateAndRiskTest {
         open.setAccessible(true);
 
         assertTrue((Boolean) open.invoke(bot, "BTCUSDT", new BigDecimal("-0.0100")));
-        assertEquals(0, client.balanceDelta.compareTo(new BigDecimal("-0.5000000000")));
-        assertEquals(0, bot.getTotalPnl().compareTo(new BigDecimal("-0.5000000000")));
+        // 根据当前配置计算手续费：POSITION_VALUE_USDT * LIVE_TAKER_FEE_RATE
+        BigDecimal expectedFee = Config.POSITION_VALUE_USDT.multiply(Config.LIVE_TAKER_FEE_RATE);
+        BigDecimal expectedPnl = expectedFee.negate();
+        // balanceDelta 和 totalPnl 应该相等（只扣手续费）
+        assertEquals(0, expectedPnl.compareTo(client.balanceDelta));
+        assertEquals(0, expectedPnl.compareTo(bot.getTotalPnl()));
         assertEquals(0, getField(bot, "consecutiveLosses"));
     }
 
@@ -185,8 +189,13 @@ class BotStateAndRiskTest {
         close.setAccessible(true);
         close.invoke(bot, "BTCUSDT", "test-close");
 
-        assertEquals(0, client.balanceDelta.compareTo(new BigDecimal("9.945000000")));
-        assertEquals(0, bot.getTotalPnl().compareTo(new BigDecimal("9.945000000")));
+        // 盈利: (110 - 100) * 1 = 10
+        BigDecimal profit = new BigDecimal("10");
+        // 平仓手续费: 110 * 1 * LIVE_TAKER_FEE_RATE
+        BigDecimal closeFee = new BigDecimal("110").multiply(Config.LIVE_TAKER_FEE_RATE);
+        BigDecimal netPnl = profit.subtract(closeFee);
+        assertEquals(0, netPnl.compareTo(client.balanceDelta));
+        assertEquals(0, netPnl.compareTo(bot.getTotalPnl()));
     }
 
     @Test
@@ -274,7 +283,11 @@ class BotStateAndRiskTest {
 
         assertFalse(position.hasPosition());
         assertEquals(0, client.closeShortCount);
-        assertEquals(0, bot.getTotalPnl().compareTo(new BigDecimal("9.890000000")));
+        // 现货平仓：盈利 (110-100)*1 = 10，手续费 110 * SPOT_TAKER_FEE_RATE
+        BigDecimal profit = new BigDecimal("10");
+        BigDecimal fee = new BigDecimal("110").multiply(Config.SPOT_TAKER_FEE_RATE);
+        BigDecimal netPnl = profit.subtract(fee);
+        assertEquals(0, bot.getTotalPnl().compareTo(netPnl));
     }
 
     @Test
@@ -321,7 +334,8 @@ class BotStateAndRiskTest {
 
     @Test
     void hedgedPositionClosesWhenCombinedHedgeLossExceedsStopLoss() throws Exception {
-        FundingArbitrageBot bot = botWithClosingClient(new BigDecimal("200"));
+        // 使用极端价格确保触发止损（当前价=300，入场价=100，SHORT方向）
+        FundingArbitrageBot bot = botWithClosingClient(new BigDecimal("300"));
         FakeExchangeClient client = (FakeExchangeClient) getField(bot, "exchangeClient");
 
         Position position = new Position("BTCUSDT");

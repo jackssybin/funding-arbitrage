@@ -92,6 +92,49 @@ public class StrategyPersistence {
     }
 
     /**
+     * 保存策略状态（带 lastSettledHourUtc，防止重启后重复结算）
+     */
+    public void saveState(Map<String, Position> positions, BigDecimal totalPnl, int totalTrades,
+                          long lastFundingIncomeQueryTime, Map<String, Long> lastFundingIncomeQueryTimes,
+                          int lastSettledHourUtc) {
+        try {
+            StrategyState state = new StrategyState();
+            state.saveTime = LocalDateTime.now().format(dtf);
+            state.totalPnl = totalPnl.doubleValue();
+            state.totalTrades = totalTrades;
+            state.lastFundingIncomeQueryTime = lastFundingIncomeQueryTime;
+            state.lastFundingIncomeQueryTimes = lastFundingIncomeQueryTimes == null
+                    ? new HashMap<>()
+                    : new HashMap<>(lastFundingIncomeQueryTimes);
+            state.lastSettledHourUtc = lastSettledHourUtc;
+
+            for (Position pos : positions.values()) {
+                if (pos.hasPosition()) {
+                    PositionState ps = new PositionState();
+                    ps.symbol = pos.getSymbol();
+                    ps.positionSide = pos.getPositionSide();
+                    ps.positionSize = pos.getPositionSize().doubleValue();
+                    ps.entryPrice = pos.getEntryPrice().doubleValue();
+                    ps.lastFundingRate = pos.getLastFundingRate().doubleValue();
+                    ps.entryTime = pos.getEntryTime().format(dtf);
+                    ps.fundingCount = pos.getFundingCount();
+                    ps.totalFundingEarned = pos.getTotalFundingEarned().doubleValue();
+                    ps.hedged = pos.isHedged();
+                    ps.spotPositionSize = pos.getSpotPositionSize().doubleValue();
+                    ps.spotEntryPrice = pos.getSpotEntryPrice().doubleValue();
+                    ps.hedgeRatio = pos.getHedgeRatio().doubleValue();
+                    state.positions.add(ps);
+                }
+            }
+
+            mapper.writeValue(new File(stateFile), state);
+            log.debug("💾 策略状态已保存");
+        } catch (Exception e) {
+            log.error("保存状态失败: {}", e.getMessage());
+        }
+    }
+
+    /**
      * 保存策略状态
      */
     public void saveState(Map<String, Position> positions, BigDecimal totalPnl, int totalTrades,
@@ -363,6 +406,8 @@ public class StrategyPersistence {
         public long lastFundingIncomeQueryTime;
         public Map<String, Long> lastFundingIncomeQueryTimes = new HashMap<>();
         public List<PositionState> positions = new ArrayList<>();
+        /** 最近一次已结算的 UTC 结算小时（0/8/16），用于重启后避免重复结算 */
+        public int lastSettledHourUtc = -1;
     }
 
     public static class PositionState {

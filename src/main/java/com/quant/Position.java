@@ -545,7 +545,8 @@ public class Position {
         if (unrealizedPnlRatio == null) return false;
         // 使用动态止损比例
         BigDecimal dynamicStopLoss = getDynamicStopLossRatio(stopLossRatio);
-        return unrealizedPnlRatio.compareTo(dynamicStopLoss.negate()) < 0;
+        // 注意: <= 而非 <，确保刚好达到阈值时也触发
+        return unrealizedPnlRatio.compareTo(dynamicStopLoss.negate()) <= 0;
     }
     
     /**
