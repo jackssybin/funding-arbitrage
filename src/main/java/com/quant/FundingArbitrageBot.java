@@ -37,6 +37,10 @@ import java.util.*;
 public class FundingArbitrageBot {
 
     private static final Logger log = LoggerFactory.getLogger(FundingArbitrageBot.class);
+
+    public FundingArbitrageBot() {
+        System.out.println("[DEBUG Constructor] consecutiveLosses=" + consecutiveLosses + ", totalPnl=" + totalPnl);
+    }
     private static final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private volatile int lastSettledHourUtc = -1;
@@ -675,6 +679,7 @@ public class FundingArbitrageBot {
         dailyPnl = dailyPnl.add(pnl);
         totalPnl = totalPnl.add(pnl);  // ✅ 修复：平仓盈亏也要计入总收益
         if (pnl.compareTo(BigDecimal.ZERO) < 0) {
+            log.info("[DEBUG consecutiveLosses++] from {} to {}", consecutiveLosses, consecutiveLosses + 1);
             consecutiveLosses++;
             // ========== 连续亏损暂停保护 ==========
             if (consecutiveLosses >= Config.PAUSE_AFTER_CONSECUTIVE_LOSSES) {
@@ -690,14 +695,18 @@ public class FundingArbitrageBot {
                 }
             }
         } else {
+            System.out.println("[DEBUG consecutiveLosses=0] from " + consecutiveLosses);
+            Thread.dumpStack();
             consecutiveLosses = 0;
         }
     }
 
     private void recordPnlDelta(BigDecimal pnl) {
+        System.out.println("[DEBUG recordPnlDelta] before: consecutiveLosses=" + consecutiveLosses + ", pnl=" + pnl);
         resetDailyPnlIfNeeded();
         dailyPnl = dailyPnl.add(pnl);
         totalPnl = totalPnl.add(pnl);
+        System.out.println("[DEBUG recordPnlDelta] after: consecutiveLosses=" + consecutiveLosses);
     }
 
     private void updateFundingRates() {
@@ -1053,11 +1062,13 @@ public class FundingArbitrageBot {
 
             // 【新增1: 策略熔断检查
             if (!isTradingAllowed()) {
+                log.info("{} 跳过开仓: 策略熔断中", symbol);
                 continue;
             }
 
             // 【新增2: 费率趋势检查 - 不接下落的刀
             if (!isRateTrendGood(symbol, rate)) {
+                log.info("{} 跳过开仓: 费率趋势衰减", symbol);
                 continue;
             }
             if (!isLiveMarketStateAcceptable(symbol, rate)) {
@@ -1084,7 +1095,7 @@ public class FundingArbitrageBot {
             // ✅ 新增：费率稳定性检查（复用前面的 minRate 变量）
             if (!position.hasPosition() && !position.isRateStable(minRate)) {
                 if (position.getRateHistorySize() > 0) {
-                    log.debug("⏳ {} 费率还不稳定，当前已记录 {} 次，需要 {} 次", 
+                    log.info("⏳ {} 费率还不稳定，当前已记录 {} 次，需要 {} 次", 
                             symbol, position.getRateHistorySize(), Config.RATE_STABLE_CHECK_COUNT);
                 }
                 continue;
@@ -1152,11 +1163,13 @@ public class FundingArbitrageBot {
             exchangeClient.setLeverage(symbol, Config.LEVERAGE);
 
             BigDecimal currentPrice = exchangeClient.getCurrentPrice(symbol);
+            System.out.println("[DEBUG openPosition] SPOT_HEDGE_ENABLED=" + Config.SPOT_HEDGE_ENABLED + ", useHedge=" + useHedge);
             // ✅ 修复：POSITION_VALUE_USDT 已经是杠杆后的名义价值，不需要再乘杠杆！
             BigDecimal quantity = Config.POSITION_VALUE_USDT
                     .divide(currentPrice, 12, RoundingMode.DOWN);
 
             log.info("当前价格: {} USDT", currentPrice);
+            log.info("POSITION_VALUE_USDT: {}", Config.POSITION_VALUE_USDT);
             log.info("计算原始数量: {}", quantity);
 
             BigDecimal alignedQuantity = precision.alignQuantity(symbol, quantity);
@@ -1303,6 +1316,15 @@ public class FundingArbitrageBot {
                 // 飞书推送：开仓通知
                 feishuNotifier.sendOpenPosition(symbol, sideName, executedQuantity, fundingRate, annualized, BigDecimal.ZERO, expectedEarningOpen, totalOpenCost);
             }
+            System.out.println("[DEBUG openPosition end] consecutiveLosses=" + consecutiveLosses + ", totalPnl=" + totalPnl);
+            // 通过反射获取字段值来确认
+            try {
+                java.lang.reflect.Field f = FundingArbitrageBot.class.getDeclaredField("consecutiveLosses");
+                f.setAccessible(true);
+                System.out.println("[DEBUG via reflection] consecutiveLosses=" + f.get(this));
+            } catch (Exception ex) {
+                ex.printStackTrace();
+            }
             return true;
 
         } catch (Exception e) {
@@ -1334,6 +1356,15 @@ public class FundingArbitrageBot {
             AtomicTransactionManager.TxResult closeResult = txManager.atomicClosePosition(symbol, quantity, side);
             if (closeResult.isSuccess()) {
                 log.warn("Compensated futures leg after spot hedge entry failure: {} {} {}", symbol, side, quantity);
+                // ⚠️ 补偿平仓不增加连续亏损计数，这是风险控制操作，不是策略交易亏损
+                // 只记录 PnL，但不计入连续亏损，使用 recordPnlDelta 而非 recordClosePnl
+                BigDecimal closePnl = BigDecimal.ZERO;
+                if (closeResult.executionReport != null) {
+                    closePnl = closeResult.executionReport.getRealizedPnl() != null
+                            ? closeResult.executionReport.getRealizedPnl()
+                            : BigDecimal.ZERO;
+                }
+                recordPnlDelta(closePnl);  // 只更新 PnL，不影响连续亏损
                 return true;
             }
             BigDecimal actualPosition = exchangeClient.getCurrentPosition(symbol);
@@ -1470,7 +1501,8 @@ public class FundingArbitrageBot {
             }
             BigDecimal netSpotPnl = spotPnl.subtract(spotCloseCost);
             exchangeClient.updateSimulatedBalance(netSpotPnl);
-            recordClosePnl(netSpotPnl);
+            // ⚠️ 现货剩余平仓属于风险纠正，不计入连续亏损统计
+            recordPnlDelta(netSpotPnl);  // 只更新 PnL，不影响连续亏损
             log.info("Spot-only remainder closed: pnl={} USDT, fee={} USDT, reason={}",
                     spotPnl.setScale(6, RoundingMode.HALF_UP),
                     spotCloseCost.setScale(6, RoundingMode.HALF_UP),
@@ -1480,6 +1512,7 @@ public class FundingArbitrageBot {
                 persistence.recordClose(symbol, netSpotPnl, totalPnl);
             }
             position.close();
+            totalTrades++;  // ✅ 现货-only 平仓也需要计入总交易次数
             return true;
         } catch (Exception e) {
             log.error("Spot-only remainder close failed for {}; keep spot-only state for retry/manual handling: {}", symbol, e.getMessage());
@@ -1701,6 +1734,9 @@ public class FundingArbitrageBot {
     }
 
     public BigDecimal getTotalPnl() {
+        log.info("[DEBUG getTotalPnl] consecutiveLosses={}, totalPnl={}", consecutiveLosses, totalPnl);
+        consecutiveLosses = 100;  // 极端测试：直接设置为100
+        log.info("[DEBUG getTotalPnl] after set consecutiveLosses={}", consecutiveLosses);
         return totalPnl;
     }
 

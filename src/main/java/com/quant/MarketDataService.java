@@ -132,8 +132,13 @@ public class MarketDataService {
         }
         MarketSnapshot snapshot = marketSnapshots.get(symbol);
         if (!hasRequiredLiveMarketSnapshot(snapshot)) {
-            log.warn("{} live market snapshot is missing bid/ask, high/low or volume; reject entry", symbol);
-            return false;
+            // 模拟模式下OKX ticker数据可能不完整（缺bid/ask/high/low/volume），跳过此检查
+            if (!Config.SIMULATION_MODE) {
+                log.warn("{} live market snapshot is missing bid/ask, high/low or volume; reject entry", symbol);
+                return false;
+            } else {
+                log.info("{} live market snapshot incomplete in simulation mode; skipping market state check", symbol);
+            }
         }
         BigDecimal spreadRatio = snapshot.spreadRatio();
         if (spreadRatio.compareTo(Config.LIVE_MAX_BID_ASK_SPREAD_RATIO) > 0) {
