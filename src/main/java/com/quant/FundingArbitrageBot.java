@@ -39,7 +39,6 @@ public class FundingArbitrageBot {
     private static final Logger log = LoggerFactory.getLogger(FundingArbitrageBot.class);
 
     public FundingArbitrageBot() {
-        System.out.println("[DEBUG Constructor] consecutiveLosses=" + consecutiveLosses + ", totalPnl=" + totalPnl);
     }
     private static final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
@@ -140,8 +139,10 @@ public class FundingArbitrageBot {
             // 5. 精度对齐
             if (exchangeClient instanceof BinanceFuturesClient) {
                 precision = new ExchangePrecision((BinanceFuturesClient) exchangeClient);
+            } else if (exchangeClient instanceof OkxClient) {
+                precision = new ExchangePrecision((OkxClient) exchangeClient);
             } else {
-                precision = new ExchangePrecision(null);
+                precision = new ExchangePrecision((BinanceFuturesClient) null);
             }
             if (Config.SIMULATION_MODE) {
                 precision.loadMockFilters();
@@ -679,7 +680,6 @@ public class FundingArbitrageBot {
         dailyPnl = dailyPnl.add(pnl);
         totalPnl = totalPnl.add(pnl);  // ✅ 修复：平仓盈亏也要计入总收益
         if (pnl.compareTo(BigDecimal.ZERO) < 0) {
-            log.info("[DEBUG consecutiveLosses++] from {} to {}", consecutiveLosses, consecutiveLosses + 1);
             consecutiveLosses++;
             // ========== 连续亏损暂停保护 ==========
             if (consecutiveLosses >= Config.PAUSE_AFTER_CONSECUTIVE_LOSSES) {
@@ -695,18 +695,14 @@ public class FundingArbitrageBot {
                 }
             }
         } else {
-            System.out.println("[DEBUG consecutiveLosses=0] from " + consecutiveLosses);
-            Thread.dumpStack();
             consecutiveLosses = 0;
         }
     }
 
     private void recordPnlDelta(BigDecimal pnl) {
-        System.out.println("[DEBUG recordPnlDelta] before: consecutiveLosses=" + consecutiveLosses + ", pnl=" + pnl);
         resetDailyPnlIfNeeded();
         dailyPnl = dailyPnl.add(pnl);
         totalPnl = totalPnl.add(pnl);
-        System.out.println("[DEBUG recordPnlDelta] after: consecutiveLosses=" + consecutiveLosses);
     }
 
     private void updateFundingRates() {
@@ -1163,7 +1159,6 @@ public class FundingArbitrageBot {
             exchangeClient.setLeverage(symbol, Config.LEVERAGE);
 
             BigDecimal currentPrice = exchangeClient.getCurrentPrice(symbol);
-            System.out.println("[DEBUG openPosition] SPOT_HEDGE_ENABLED=" + Config.SPOT_HEDGE_ENABLED + ", useHedge=" + useHedge);
             // ✅ 修复：POSITION_VALUE_USDT 已经是杠杆后的名义价值，不需要再乘杠杆！
             BigDecimal quantity = Config.POSITION_VALUE_USDT
                     .divide(currentPrice, 12, RoundingMode.DOWN);
@@ -1315,15 +1310,6 @@ public class FundingArbitrageBot {
                 log.info("");
                 // 飞书推送：开仓通知
                 feishuNotifier.sendOpenPosition(symbol, sideName, executedQuantity, fundingRate, annualized, BigDecimal.ZERO, expectedEarningOpen, totalOpenCost);
-            }
-            System.out.println("[DEBUG openPosition end] consecutiveLosses=" + consecutiveLosses + ", totalPnl=" + totalPnl);
-            // 通过反射获取字段值来确认
-            try {
-                java.lang.reflect.Field f = FundingArbitrageBot.class.getDeclaredField("consecutiveLosses");
-                f.setAccessible(true);
-                System.out.println("[DEBUG via reflection] consecutiveLosses=" + f.get(this));
-            } catch (Exception ex) {
-                ex.printStackTrace();
             }
             return true;
 
@@ -1734,9 +1720,6 @@ public class FundingArbitrageBot {
     }
 
     public BigDecimal getTotalPnl() {
-        log.info("[DEBUG getTotalPnl] consecutiveLosses={}, totalPnl={}", consecutiveLosses, totalPnl);
-        consecutiveLosses = 100;  // 极端测试：直接设置为100
-        log.info("[DEBUG getTotalPnl] after set consecutiveLosses={}", consecutiveLosses);
         return totalPnl;
     }
 

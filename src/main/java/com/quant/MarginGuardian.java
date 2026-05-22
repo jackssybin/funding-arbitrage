@@ -94,6 +94,10 @@ public class MarginGuardian {
 
     public void checkAndTopupIfNeeded() {
         if (client == null) {
+            if (okxClient != null) {
+                checkOkxAndTopupIfNeeded();
+                return;
+            }
             log.debug("[OKX模式] 保证金守护暂不支持自动划转，跳过检查");
             return;
         }
@@ -131,6 +135,22 @@ public class MarginGuardian {
         public BigDecimal availableBalance;
         public BigDecimal totalMarginBalance;
         public BigDecimal marginRatio;
+    }
+
+    private void checkOkxAndTopupIfNeeded() {
+        try {
+            BigDecimal tradingBalance = okxClient.getBalance();
+            if (tradingBalance.compareTo(TOPUP_AMOUNT) < 0) {
+                log.warn("OKX trading balance {} USDT is below {}; transfer from funding account",
+                        tradingBalance, TOPUP_AMOUNT);
+                boolean success = transferFromSpotToFutures(TOPUP_AMOUNT);
+                if (!success) {
+                    log.error("OKX emergency transfer failed; manual margin check required");
+                }
+            }
+        } catch (Exception e) {
+            log.error("OKX margin guardian check failed: {}", e.getMessage());
+        }
     }
 
     private AccountInfo getFuturesAccountInfo() throws IOException {
@@ -191,6 +211,9 @@ public class MarginGuardian {
         if (Config.SIMULATION_MODE) {
             log.info("[模拟模式] 从现货划转 {} USDT 到合约", amount);
             return true;
+        }
+        if (okxClient != null) {
+            return okxClient.transferFromSpotToFutures(amount);
         }
 
         long timestamp = System.currentTimeMillis();

@@ -26,13 +26,21 @@ public class ExchangePrecision {
     private static final Logger log = LoggerFactory.getLogger(ExchangePrecision.class);
 
     private final BinanceFuturesClient client;
+    private final OkxClient okxClient;
     
     // 缓存每个币种的精度规则
     private final Map<String, SymbolFilters> symbolFilters = new HashMap<>();
+    private final Map<String, SymbolFilters> spotSymbolFilters = new HashMap<>();
 
     /** 支持传入 null（OKX 模式），此时使用 loadMockFilters 代替实际请求 */
     public ExchangePrecision(BinanceFuturesClient client) {
         this.client = client;
+        this.okxClient = null;
+    }
+
+    public ExchangePrecision(OkxClient okxClient) {
+        this.client = null;
+        this.okxClient = okxClient;
     }
 
     /**
@@ -58,6 +66,15 @@ public class ExchangePrecision {
      * 从交易所加载所有币种的精度规则
      */
     public void loadAllSymbolFilters() throws IOException {
+        if (okxClient != null) {
+            log.info("Loading OKX live precision rules from public instruments...");
+            symbolFilters.clear();
+            spotSymbolFilters.clear();
+            symbolFilters.putAll(okxClient.loadOkxPrecisionFilters(Config.TRADING_SYMBOLS, false));
+            spotSymbolFilters.putAll(okxClient.loadOkxPrecisionFilters(Config.TRADING_SYMBOLS, true));
+            log.info("Loaded OKX precision rules: swap={}, spot={}", symbolFilters.size(), spotSymbolFilters.size());
+            return;
+        }
         if (client == null) {
             log.info("ℹ️ OKX 模式下使用 Mock 精度规则");
             loadMockFilters();
@@ -155,6 +172,19 @@ public class ExchangePrecision {
      * 默认使用合约数量规则，不同交易所可以覆盖
      */
     public BigDecimal alignSpotQuantity(String symbol, BigDecimal quantity) {
+        SymbolFilters spotFilters = spotSymbolFilters.get(symbol);
+        if (spotFilters != null) {
+            BigDecimal divided = quantity.divide(spotFilters.stepSize, 0, RoundingMode.DOWN);
+            BigDecimal aligned = divided.multiply(spotFilters.stepSize);
+            if (aligned.compareTo(spotFilters.minQty) < 0) {
+                log.warn("Spot quantity below minimum: {} {} < {}", symbol, aligned, spotFilters.minQty);
+                return BigDecimal.ZERO;
+            }
+            if (aligned.compareTo(spotFilters.maxQty) > 0) {
+                aligned = spotFilters.maxQty;
+            }
+            return aligned;
+        }
         // 现货与合约使用相同的精度规则
         return alignQuantity(symbol, quantity);
     }

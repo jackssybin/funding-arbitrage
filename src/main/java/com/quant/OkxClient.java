@@ -42,9 +42,35 @@ public class OkxClient implements ExchangeClient {
     private final boolean simulated; // OKX 官方模拟盘（Testnet），需要 x-simulated-trading:1 头
 
     private final OkHttpClient httpClient;
+    private final Map<String, InstrumentSpec> swapInstrumentCache = new HashMap<>();
+    private volatile PositionMode positionMode;
 
     // 模拟模式余额维护（解决余额永远10000的BUG）
     private BigDecimal simulatedBalance = new BigDecimal("10000");
+
+    enum PositionMode {
+        LONG_SHORT,
+        NET
+    }
+
+    static class InstrumentSpec {
+        final String symbol;
+        final String instId;
+        final BigDecimal ctVal;
+        final BigDecimal lotSz;
+        final BigDecimal minSz;
+        final BigDecimal tickSz;
+
+        InstrumentSpec(String symbol, String instId, BigDecimal ctVal, BigDecimal lotSz,
+                       BigDecimal minSz, BigDecimal tickSz) {
+            this.symbol = symbol;
+            this.instId = instId;
+            this.ctVal = ctVal;
+            this.lotSz = lotSz;
+            this.minSz = minSz;
+            this.tickSz = tickSz;
+        }
+    }
 
     @Override
     public void updateSimulatedBalance(BigDecimal delta) {
@@ -224,6 +250,26 @@ public class OkxClient implements ExchangeClient {
         }
     }
 
+    @Override
+    public BigDecimal getPredictedFundingRate(String symbol) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            return getFundingRate(symbol);
+        }
+
+        String instId = toOkxInstId(symbol);
+        String url = BASE_URL + "/api/v5/public/funding-rate?instId=" + instId;
+
+        Request request = new Request.Builder().url(url).get().build();
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = checkResponse(response, "get predicted funding rate");
+            JsonNode item = mapper.readTree(body).get("data").get(0);
+            String predicted = item.hasNonNull("nextFundingRate") && !item.get("nextFundingRate").asText().isEmpty()
+                    ? item.get("nextFundingRate").asText()
+                    : item.get("fundingRate").asText();
+            return new BigDecimal(predicted);
+        }
+    }
+
     /**
      * 获取当前价格
      * OKX 接口：GET /api/v5/market/ticker?instId=BTC-USDT-SWAP
@@ -320,6 +366,177 @@ public class OkxClient implements ExchangeClient {
         return records;
     }
 
+    Map<String, ExchangePrecision.SymbolFilters> loadOkxPrecisionFilters(List<String> symbols, boolean spot)
+            throws IOException {
+        Map<String, ExchangePrecision.SymbolFilters> filtersBySymbol = new HashMap<>();
+        String instType = spot ? "SPOT" : "SWAP";
+        String url = BASE_URL + "/api/v5/public/instruments?instType=" + instType;
+        Request request = new Request.Builder().url(url).get().build();
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = checkResponse(response, "load OKX " + instType + " instruments");
+            JsonNode data = mapper.readTree(body).get("data");
+            if (data == null) {
+                return filtersBySymbol;
+            }
+            for (JsonNode item : data) {
+                String symbol = fromOkxInstId(item.path("instId").asText());
+                if (!symbols.contains(symbol)) {
+                    continue;
+                }
+                ExchangePrecision.SymbolFilters filters = new ExchangePrecision.SymbolFilters();
+                filters.symbol = symbol;
+                filters.tickSize = readDecimal(item, "tickSz", "0.00000001");
+                filters.tickScale = Math.max(0, filters.tickSize.stripTrailingZeros().scale());
+                if (spot) {
+                    filters.stepSize = readDecimal(item, "lotSz", "0.00000001");
+                    filters.minQty = readDecimal(item, "minSz", filters.stepSize.toPlainString());
+                    filters.maxQty = new BigDecimal("999999999");
+                } else {
+                    InstrumentSpec spec = toInstrumentSpec(symbol, item);
+                    swapInstrumentCache.put(symbol, spec);
+                    filters.stepSize = spec.ctVal.multiply(spec.lotSz);
+                    filters.minQty = spec.ctVal.multiply(spec.minSz);
+                    filters.maxQty = spec.ctVal.multiply(new BigDecimal("999999999"));
+                }
+                filters.stepScale = Math.max(0, filters.stepSize.stripTrailingZeros().scale());
+                filtersBySymbol.put(symbol, filters);
+            }
+        }
+        return filtersBySymbol;
+    }
+
+    private InstrumentSpec getSwapInstrument(String symbol) throws IOException {
+        InstrumentSpec cached = swapInstrumentCache.get(symbol);
+        if (cached != null) {
+            return cached;
+        }
+        if (Config.SIMULATION_MODE) {
+            InstrumentSpec spec = defaultSimulatedSwapInstrument(symbol);
+            swapInstrumentCache.put(symbol, spec);
+            return spec;
+        }
+
+        String instId = toOkxInstId(symbol);
+        String url = BASE_URL + "/api/v5/public/instruments?instType=SWAP&instId=" + instId;
+        Request request = new Request.Builder().url(url).get().build();
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = checkResponse(response, "load OKX swap instrument");
+            JsonNode data = mapper.readTree(body).get("data");
+            if (data == null || data.size() == 0) {
+                throw new IOException("OKX instrument not found: " + instId);
+            }
+            InstrumentSpec spec = toInstrumentSpec(symbol, data.get(0));
+            swapInstrumentCache.put(symbol, spec);
+            return spec;
+        }
+    }
+
+    private InstrumentSpec toInstrumentSpec(String symbol, JsonNode item) {
+        String instId = item.path("instId").asText(toOkxInstId(symbol));
+        BigDecimal ctVal = readDecimal(item, "ctVal", "1");
+        BigDecimal lotSz = readDecimal(item, "lotSz", "1");
+        BigDecimal minSz = readDecimal(item, "minSz", lotSz.toPlainString());
+        BigDecimal tickSz = readDecimal(item, "tickSz", "0.00000001");
+        return new InstrumentSpec(symbol, instId, ctVal, lotSz, minSz, tickSz);
+    }
+
+    private InstrumentSpec defaultSimulatedSwapInstrument(String symbol) {
+        BigDecimal ctVal;
+        if (symbol.startsWith("BTC")) {
+            ctVal = new BigDecimal("0.01");
+        } else if (symbol.startsWith("ETH")) {
+            ctVal = new BigDecimal("0.1");
+        } else if (symbol.startsWith("DOGE")) {
+            ctVal = new BigDecimal("100");
+        } else {
+            ctVal = BigDecimal.ONE;
+        }
+        return new InstrumentSpec(symbol, toOkxInstId(symbol), ctVal, BigDecimal.ONE, BigDecimal.ONE,
+                new BigDecimal("0.00000001"));
+    }
+
+    BigDecimal toContractSize(String symbol, BigDecimal baseQuantity) throws IOException {
+        InstrumentSpec spec = getSwapInstrument(symbol);
+        BigDecimal contracts = baseQuantity.divide(spec.ctVal, 0, RoundingMode.DOWN);
+        BigDecimal aligned = contracts.divide(spec.lotSz, 0, RoundingMode.DOWN).multiply(spec.lotSz);
+        if (aligned.compareTo(spec.minSz) < 0) {
+            throw new IOException(symbol + " OKX contract size " + aligned + " is below minSz " + spec.minSz);
+        }
+        return aligned.stripTrailingZeros();
+    }
+
+    BigDecimal toBaseQuantity(String symbol, BigDecimal contracts) throws IOException {
+        return contracts.multiply(getSwapInstrument(symbol).ctVal);
+    }
+
+    void cacheSwapInstrumentForTesting(String symbol, BigDecimal ctVal, BigDecimal lotSz, BigDecimal minSz) {
+        swapInstrumentCache.put(symbol, new InstrumentSpec(symbol, toOkxInstId(symbol), ctVal, lotSz, minSz,
+                new BigDecimal("0.00000001")));
+    }
+
+    private PositionMode getPositionMode() throws IOException {
+        if (positionMode != null) {
+            return positionMode;
+        }
+        if (Config.SIMULATION_MODE) {
+            positionMode = PositionMode.LONG_SHORT;
+            return positionMode;
+        }
+        String path = "/api/v5/account/config";
+        Request request = buildSignedRequest("GET", path, "");
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = checkResponse(response, "query OKX account config");
+            JsonNode data = mapper.readTree(body).get("data");
+            String mode = data != null && data.size() > 0 ? data.get(0).path("posMode").asText("") : "";
+            positionMode = "net_mode".equalsIgnoreCase(mode) ? PositionMode.NET : PositionMode.LONG_SHORT;
+            log.info("OKX position mode detected: {}", positionMode);
+            return positionMode;
+        }
+    }
+
+    private String placeSwapMarketOrder(String symbol, BigDecimal baseQuantity, String side,
+                                        String longShortPosSide, boolean reduceOnly) throws IOException {
+        BigDecimal contracts = toContractSize(symbol, baseQuantity);
+        PositionMode mode = getPositionMode();
+        String instId = toOkxInstId(symbol);
+        StringBuilder body = new StringBuilder();
+        body.append("{\"instId\":\"").append(instId)
+                .append("\",\"tdMode\":\"isolated\",\"side\":\"").append(side)
+                .append("\",\"ordType\":\"market\",\"sz\":\"").append(contracts.toPlainString()).append("\"");
+        if (mode == PositionMode.LONG_SHORT) {
+            body.append(",\"posSide\":\"").append(longShortPosSide).append("\"");
+        } else if (reduceOnly) {
+            body.append(",\"reduceOnly\":\"true\"");
+        }
+        body.append("}");
+
+        Request request = buildSignedRequest("POST", "/api/v5/trade/order", body.toString());
+        try (Response response = httpClient.newCall(request).execute()) {
+            String responseBody = checkResponse(response, "place OKX swap order");
+            JsonNode json = mapper.readTree(responseBody);
+            String ordId = json.get("data").get(0).get("ordId").asText();
+            log.info("OKX swap order placed: symbol={}, baseQty={}, contracts={}, mode={}, orderId={}",
+                    symbol, baseQuantity, contracts, mode, ordId);
+            return ordId;
+        }
+    }
+
+    private void postSetLeverage(String instId, int leverage, String posSide) throws IOException {
+        String path = "/api/v5/account/set-leverage";
+        StringBuilder body = new StringBuilder();
+        body.append("{\"instId\":\"").append(instId)
+                .append("\",\"lever\":\"").append(leverage)
+                .append("\",\"mgnMode\":\"isolated\"");
+        if (posSide != null && !posSide.isEmpty()) {
+            body.append(",\"posSide\":\"").append(posSide).append("\"");
+        }
+        body.append("}");
+        Request request = buildSignedRequest("POST", path, body.toString());
+        try (Response response = httpClient.newCall(request).execute()) {
+            checkResponse(response, "set OKX leverage");
+        }
+    }
+
     // ===================================================================
     // 合约接口（需要签名）
     // ===================================================================
@@ -336,6 +553,12 @@ public class OkxClient implements ExchangeClient {
         }
 
         String instId = toOkxInstId(symbol);
+        if (getPositionMode() == PositionMode.LONG_SHORT) {
+            postSetLeverage(instId, leverage, "long");
+            postSetLeverage(instId, leverage, "short");
+            log.info("OKX set {} leverage {}x for long/short position mode", symbol, leverage);
+            return;
+        }
         String path = "/api/v5/account/set-leverage";
         String bodyStr = String.format("{\"instId\":\"%s\",\"lever\":\"%d\",\"mgnMode\":\"isolated\"}", instId, leverage);
 
@@ -356,6 +579,9 @@ public class OkxClient implements ExchangeClient {
         if (Config.SIMULATION_MODE) {
             log.info("[模拟模式] OKX 合约做空 {} 数量 {}", symbol, quantity);
             return "OKX_SIM_" + System.currentTimeMillis();
+        }
+        if (!Config.SIMULATION_MODE) {
+            return placeSwapMarketOrder(symbol, quantity, "sell", "short", false);
         }
 
         String instId = toOkxInstId(symbol);
@@ -388,6 +614,9 @@ public class OkxClient implements ExchangeClient {
             log.info("[模拟模式] OKX 平空 {} 数量 {}", symbol, quantity);
             return "OKX_SIM_CLOSE_" + System.currentTimeMillis();
         }
+        if (!Config.SIMULATION_MODE) {
+            return placeSwapMarketOrder(symbol, quantity, "buy", "short", true);
+        }
 
         String instId = toOkxInstId(symbol);
         String path = "/api/v5/trade/order";
@@ -416,6 +645,9 @@ public class OkxClient implements ExchangeClient {
             log.info("[模拟模式] OKX 合约做多 {} 数量 {}", symbol, quantity);
             return "OKX_SIM_LONG_" + System.currentTimeMillis();
         }
+        if (!Config.SIMULATION_MODE) {
+            return placeSwapMarketOrder(symbol, quantity, "buy", "long", false);
+        }
 
         String instId = toOkxInstId(symbol);
         String path = "/api/v5/trade/order";
@@ -443,6 +675,9 @@ public class OkxClient implements ExchangeClient {
         if (Config.SIMULATION_MODE) {
             log.info("[模拟模式] OKX 平多 {} 数量 {}", symbol, quantity);
             return "OKX_SIM_CLOSE_LONG_" + System.currentTimeMillis();
+        }
+        if (!Config.SIMULATION_MODE) {
+            return placeSwapMarketOrder(symbol, quantity, "sell", "long", true);
         }
 
         String instId = toOkxInstId(symbol);
@@ -506,10 +741,13 @@ public class OkxClient implements ExchangeClient {
             if (fills == null) {
                 return;
             }
+            String symbol = fromOkxInstId(instId);
             for (JsonNode fill : fills) {
+                BigDecimal fillContracts = readDecimal(fill, "fillSz", "0");
+                BigDecimal fillBaseQuantity = toBaseQuantity(symbol, fillContracts);
                 report.addFill(
                         readDecimal(fill, "fillPx", "0"),
-                        readDecimal(fill, "fillSz", "0"),
+                        fillBaseQuantity,
                         readDecimal(fill, "fee", "0"),
                         fill.hasNonNull("feeCcy") ? fill.get("feeCcy").asText() : "USDT",
                         readDecimal(fill, "fillPnl", "0"),
@@ -531,10 +769,20 @@ public class OkxClient implements ExchangeClient {
             String body = checkResponse(response, "查询持仓");
             JsonNode json = mapper.readTree(body);
             JsonNode data = json.get("data");
+            BigDecimal totalBasePosition = BigDecimal.ZERO;
             if (data != null && data.size() > 0) {
                 // pos 为正代表多仓，为负代表空仓（我们用空仓，所以取负值）
-                String pos = data.get(0).get("pos").asText("0");
-                return new BigDecimal(pos);
+                for (JsonNode item : data) {
+                    BigDecimal contracts = readDecimal(item, "pos", "0");
+                    BigDecimal baseQty = toBaseQuantity(symbol, contracts.abs());
+                    String posSide = item.path("posSide").asText("");
+                    if ("short".equalsIgnoreCase(posSide) || contracts.compareTo(BigDecimal.ZERO) < 0) {
+                        totalBasePosition = totalBasePosition.subtract(baseQty);
+                    } else {
+                        totalBasePosition = totalBasePosition.add(baseQty);
+                    }
+                }
+                return totalBasePosition;
             }
             return BigDecimal.ZERO;
         }
@@ -548,7 +796,7 @@ public class OkxClient implements ExchangeClient {
     public BigDecimal getBalance() throws IOException {
         if (Config.SIMULATION_MODE) return this.simulatedBalance;
 
-        String path = "/api/v5/account/balance?ccy=USDT";
+        String path = "/api/v5/asset/balances?ccy=USDT";
         Request request = buildSignedRequest("GET", path, "");
         try (Response response = httpClient.newCall(request).execute()) {
             String body = checkResponse(response, "查询余额");
@@ -588,10 +836,10 @@ public class OkxClient implements ExchangeClient {
             JsonNode json = mapper.readTree(body);
             JsonNode data = json.get("data");
             if (data != null && data.size() > 0) {
-                JsonNode details = data.get(0).get("details");
-                if (details != null && details.size() > 0) {
-                    String availBal = details.get(0).get("availBal").asText("0");
-                    return new BigDecimal(availBal);
+                for (JsonNode balance : data) {
+                    if ("USDT".equalsIgnoreCase(balance.path("ccy").asText())) {
+                        return readDecimal(balance, "availBal", "0");
+                    }
                 }
             }
             return BigDecimal.ZERO;
@@ -675,6 +923,22 @@ public class OkxClient implements ExchangeClient {
         }
         String orderId = sellSpot(symbol, quantity);
         return getSpotExecutionReport(symbol, orderId, quantity);
+    }
+
+    public boolean transferFromSpotToFutures(BigDecimal amount) throws IOException {
+        if (Config.SIMULATION_MODE) {
+            log.info("[simulation] OKX transfer {} USDT from funding to trading account", amount);
+            return true;
+        }
+        String path = "/api/v5/asset/transfer";
+        String bodyStr = String.format(
+                "{\"ccy\":\"USDT\",\"amt\":\"%s\",\"from\":\"6\",\"to\":\"18\",\"type\":\"0\"}",
+                amount.toPlainString());
+        Request request = buildSignedRequest("POST", path, bodyStr);
+        try (Response response = httpClient.newCall(request).execute()) {
+            checkResponse(response, "OKX asset transfer");
+            return true;
+        }
     }
 
     // ===================================================================
@@ -801,5 +1065,15 @@ public class OkxClient implements ExchangeClient {
             return base + "-USDT";
         }
         return symbol;
+    }
+
+    private String fromOkxInstId(String instId) {
+        if (instId == null) {
+            return "";
+        }
+        String normalized = instId.endsWith("-SWAP")
+                ? instId.substring(0, instId.length() - "-SWAP".length())
+                : instId;
+        return normalized.replace("-", "");
     }
 }

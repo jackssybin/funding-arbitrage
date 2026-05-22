@@ -150,7 +150,7 @@ class BotStateAndRiskTest {
         FundingArbitrageBot bot = new FundingArbitrageBot();
         FakeExchangeClient client = new FakeExchangeClient(false, new BigDecimal("10000"), new BigDecimal("100"));
         setField(bot, "exchangeClient", client);
-        setField(bot, "precision", new ExchangePrecision(null));
+        setField(bot, "precision", new ExchangePrecision((BinanceFuturesClient) null));
         setField(bot, "txManager", new AtomicTransactionManager(client, new ClosingSmartOrderExecutor(client)));
         setField(bot, "feishuNotifier", new FeishuNotifier());
         setField(bot, "dailyReporter", new DailyReporter());
@@ -170,7 +170,7 @@ class BotStateAndRiskTest {
         FundingArbitrageBot bot = new FundingArbitrageBot();
         FakeExchangeClient client = new FakeExchangeClient(false, new BigDecimal("10000"), new BigDecimal("110"));
         setField(bot, "exchangeClient", client);
-        setField(bot, "precision", new ExchangePrecision(null));
+        setField(bot, "precision", new ExchangePrecision((BinanceFuturesClient) null));
         setField(bot, "txManager", new AtomicTransactionManager(client, new ClosingSmartOrderExecutor(client)));
         setField(bot, "feishuNotifier", new FeishuNotifier());
         setField(bot, "dailyReporter", new DailyReporter());
@@ -197,7 +197,7 @@ class BotStateAndRiskTest {
         client.executionReport.addFill(new BigDecimal("108"), BigDecimal.ONE,
                 new BigDecimal("0.040"), "USDT", BigDecimal.ZERO, "fill-1");
         setField(bot, "exchangeClient", client);
-        setField(bot, "precision", new ExchangePrecision(null));
+        setField(bot, "precision", new ExchangePrecision((BinanceFuturesClient) null));
         setField(bot, "txManager", new AtomicTransactionManager(client, new ClosingSmartOrderExecutor(client)));
         setField(bot, "feishuNotifier", new FeishuNotifier());
         setField(bot, "dailyReporter", new DailyReporter());
@@ -221,7 +221,7 @@ class BotStateAndRiskTest {
         FakeExchangeClient client = new FakeExchangeClient(false, new BigDecimal("10000"), new BigDecimal("110"));
         client.failSpotClose = true;
         setField(bot, "exchangeClient", client);
-        setField(bot, "precision", new ExchangePrecision(null));
+        setField(bot, "precision", new ExchangePrecision((BinanceFuturesClient) null));
         setField(bot, "txManager", new AtomicTransactionManager(client, new ClosingSmartOrderExecutor(client)));
         setField(bot, "feishuNotifier", new FeishuNotifier());
         setField(bot, "dailyReporter", new DailyReporter());
@@ -256,7 +256,7 @@ class BotStateAndRiskTest {
         FundingArbitrageBot bot = new FundingArbitrageBot();
         FakeExchangeClient client = new FakeExchangeClient(false, new BigDecimal("10000"), new BigDecimal("110"));
         setField(bot, "exchangeClient", client);
-        setField(bot, "precision", new ExchangePrecision(null));
+        setField(bot, "precision", new ExchangePrecision((BinanceFuturesClient) null));
         setField(bot, "txManager", new AtomicTransactionManager(client, new ClosingSmartOrderExecutor(client)));
         setField(bot, "feishuNotifier", new FeishuNotifier());
         setField(bot, "dailyReporter", new DailyReporter());
@@ -374,7 +374,7 @@ class BotStateAndRiskTest {
         FundingArbitrageBot bot = new FundingArbitrageBot();
         FakeExchangeClient client = new FakeExchangeClient(false, new BigDecimal("10000"), currentPrice);
         setField(bot, "exchangeClient", client);
-        setField(bot, "precision", new ExchangePrecision(null));
+        setField(bot, "precision", new ExchangePrecision((BinanceFuturesClient) null));
         setField(bot, "txManager", new AtomicTransactionManager(client, new ClosingSmartOrderExecutor(client)));
         setField(bot, "feishuNotifier", new FeishuNotifier());
         setField(bot, "dailyReporter", new DailyReporter());
