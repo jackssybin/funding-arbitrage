@@ -159,7 +159,7 @@ class BotStateAndRiskTest {
         Method open = FundingArbitrageBot.class.getDeclaredMethod("openPosition", String.class, BigDecimal.class);
         open.setAccessible(true);
 
-        assertTrue((Boolean) open.invoke(bot, "BTCUSDT", new BigDecimal("0.0100")));
+        assertTrue((Boolean) open.invoke(bot, "BTCUSDT", new BigDecimal("-0.0100")));
         assertEquals(0, client.balanceDelta.compareTo(new BigDecimal("-0.5000000000")));
         assertEquals(0, bot.getTotalPnl().compareTo(new BigDecimal("-0.5000000000")));
         assertEquals(0, getField(bot, "consecutiveLosses"));

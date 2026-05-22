@@ -29,4 +29,13 @@ class OkxClientTest {
         assertThrows(java.io.IOException.class,
                 () -> client.toContractSize("DOGEUSDT", new BigDecimal("99")));
     }
+
+    @Test
+    void normalizesOkxMarginModeAliases() {
+        assertEquals("isolated", OkxClient.normalizeOkxMarginMode("iso"));
+        assertEquals("isolated", OkxClient.normalizeOkxMarginMode("isolated"));
+        assertEquals("cross", OkxClient.normalizeOkxMarginMode("cross_margin"));
+        assertEquals("cross", OkxClient.normalizeOkxMarginMode("cross"));
+        assertThrows(IllegalArgumentException.class, () -> OkxClient.normalizeOkxMarginMode("portfolio"));
+    }
 }

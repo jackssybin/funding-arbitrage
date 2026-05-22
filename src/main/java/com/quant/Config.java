@@ -35,6 +35,8 @@ public class Config {
     public static final String OKX_PASSPHRASE = getEnv("OKX_PASSPHRASE", "");
     /** 是否使用 OKX 官方模拟盘（true=模拟盘，false=实盘） */
     public static final boolean OKX_SIMULATED_TRADING = Boolean.parseBoolean(getEnv("OKX_SIMULATED_TRADING", "false"));
+    /** OKX swap margin mode: isolated/cross. Also accepts iso/cross_margin in env. */
+    public static final String OKX_MARGIN_MODE = getEnv("OKX_MARGIN_MODE", "isolated");
 
     // ========== 多币种配置 [功能1] ==========
     // 监控的交易对列表

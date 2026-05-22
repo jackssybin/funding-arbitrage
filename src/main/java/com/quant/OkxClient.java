@@ -455,6 +455,22 @@ public class OkxClient implements ExchangeClient {
                 new BigDecimal("0.00000001"));
     }
 
+    static String normalizeOkxMarginMode(String configuredMode) {
+        String mode = configuredMode == null ? "" : configuredMode.trim().toLowerCase(Locale.ROOT);
+        if ("cross".equals(mode) || "cross_margin".equals(mode)) {
+            return "cross";
+        }
+        if ("isolated".equals(mode) || "iso".equals(mode)) {
+            return "isolated";
+        }
+        throw new IllegalArgumentException("Unsupported OKX_MARGIN_MODE: " + configuredMode
+                + ". Use isolated or cross.");
+    }
+
+    private String okxMarginMode() {
+        return normalizeOkxMarginMode(Config.OKX_MARGIN_MODE);
+    }
+
     BigDecimal toContractSize(String symbol, BigDecimal baseQuantity) throws IOException {
         InstrumentSpec spec = getSwapInstrument(symbol);
         BigDecimal contracts = baseQuantity.divide(spec.ctVal, 0, RoundingMode.DOWN);
@@ -499,9 +515,10 @@ public class OkxClient implements ExchangeClient {
         BigDecimal contracts = toContractSize(symbol, baseQuantity);
         PositionMode mode = getPositionMode();
         String instId = toOkxInstId(symbol);
+        String marginMode = okxMarginMode();
         StringBuilder body = new StringBuilder();
         body.append("{\"instId\":\"").append(instId)
-                .append("\",\"tdMode\":\"isolated\",\"side\":\"").append(side)
+                .append("\",\"tdMode\":\"").append(marginMode).append("\",\"side\":\"").append(side)
                 .append("\",\"ordType\":\"market\",\"sz\":\"").append(contracts.toPlainString()).append("\"");
         if (mode == PositionMode.LONG_SHORT) {
             body.append(",\"posSide\":\"").append(longShortPosSide).append("\"");
@@ -523,10 +540,11 @@ public class OkxClient implements ExchangeClient {
 
     private void postSetLeverage(String instId, int leverage, String posSide) throws IOException {
         String path = "/api/v5/account/set-leverage";
+        String marginMode = okxMarginMode();
         StringBuilder body = new StringBuilder();
         body.append("{\"instId\":\"").append(instId)
                 .append("\",\"lever\":\"").append(leverage)
-                .append("\",\"mgnMode\":\"isolated\"");
+                .append("\",\"mgnMode\":\"").append(marginMode).append("\"");
         if (posSide != null && !posSide.isEmpty()) {
             body.append(",\"posSide\":\"").append(posSide).append("\"");
         }
@@ -560,7 +578,8 @@ public class OkxClient implements ExchangeClient {
             return;
         }
         String path = "/api/v5/account/set-leverage";
-        String bodyStr = String.format("{\"instId\":\"%s\",\"lever\":\"%d\",\"mgnMode\":\"isolated\"}", instId, leverage);
+        String bodyStr = String.format("{\"instId\":\"%s\",\"lever\":\"%d\",\"mgnMode\":\"%s\"}",
+                instId, leverage, okxMarginMode());
 
         Request request = buildSignedRequest("POST", path, bodyStr);
         try (Response response = httpClient.newCall(request).execute()) {
@@ -572,7 +591,7 @@ public class OkxClient implements ExchangeClient {
     /**
      * 合约做空（开空永续合约）
      * OKX 接口：POST /api/v5/trade/order
-     * side=sell, posSide=short, tdMode=isolated
+     * side=sell, posSide=short, tdMode=Config.OKX_MARGIN_MODE
      */
     @Override
     public String openShort(String symbol, BigDecimal quantity) throws IOException {
@@ -589,9 +608,9 @@ public class OkxClient implements ExchangeClient {
         // OKX 合约下单数量单位是"张"，1张 = 合约乘数（sz 字段）
         // 这里假设已提前处理好，quantity 为张数
         String bodyStr = String.format(
-                "{\"instId\":\"%s\",\"tdMode\":\"isolated\",\"side\":\"sell\",\"posSide\":\"short\"," +
+                "{\"instId\":\"%s\",\"tdMode\":\"%s\",\"side\":\"sell\",\"posSide\":\"short\"," +
                 "\"ordType\":\"market\",\"sz\":\"%s\"}",
-                instId, quantity.toPlainString());
+                instId, okxMarginMode(), quantity.toPlainString());
 
         Request request = buildSignedRequest("POST", path, bodyStr);
         try (Response response = httpClient.newCall(request).execute()) {
@@ -621,9 +640,9 @@ public class OkxClient implements ExchangeClient {
         String instId = toOkxInstId(symbol);
         String path = "/api/v5/trade/order";
         String bodyStr = String.format(
-                "{\"instId\":\"%s\",\"tdMode\":\"isolated\",\"side\":\"buy\",\"posSide\":\"short\"," +
+                "{\"instId\":\"%s\",\"tdMode\":\"%s\",\"side\":\"buy\",\"posSide\":\"short\"," +
                 "\"ordType\":\"market\",\"sz\":\"%s\"}",
-                instId, quantity.toPlainString());
+                instId, okxMarginMode(), quantity.toPlainString());
 
         Request request = buildSignedRequest("POST", path, bodyStr);
         try (Response response = httpClient.newCall(request).execute()) {
@@ -637,7 +656,7 @@ public class OkxClient implements ExchangeClient {
 
     /**
      * Bug-6修复: 合约做多（开多永续合约，负费率时使用）
-     * side=buy, posSide=long, tdMode=isolated
+     * side=buy, posSide=long, tdMode=Config.OKX_MARGIN_MODE
      */
     @Override
     public String openLong(String symbol, BigDecimal quantity) throws IOException {
@@ -652,9 +671,9 @@ public class OkxClient implements ExchangeClient {
         String instId = toOkxInstId(symbol);
         String path = "/api/v5/trade/order";
         String bodyStr = String.format(
-                "{\"instId\":\"%s\",\"tdMode\":\"isolated\",\"side\":\"buy\",\"posSide\":\"long\"," +
+                "{\"instId\":\"%s\",\"tdMode\":\"%s\",\"side\":\"buy\",\"posSide\":\"long\"," +
                 "\"ordType\":\"market\",\"sz\":\"%s\"}",
-                instId, quantity.toPlainString());
+                instId, okxMarginMode(), quantity.toPlainString());
 
         Request request = buildSignedRequest("POST", path, bodyStr);
         try (Response response = httpClient.newCall(request).execute()) {
@@ -668,7 +687,7 @@ public class OkxClient implements ExchangeClient {
 
     /**
      * Bug-6修复: 合约平多（卖出平仓，reduceOnly 语义由 posSide=long 保证）
-     * side=sell, posSide=long, tdMode=isolated
+     * side=sell, posSide=long, tdMode=Config.OKX_MARGIN_MODE
      */
     @Override
     public String closeLong(String symbol, BigDecimal quantity) throws IOException {
@@ -683,9 +702,9 @@ public class OkxClient implements ExchangeClient {
         String instId = toOkxInstId(symbol);
         String path = "/api/v5/trade/order";
         String bodyStr = String.format(
-                "{\"instId\":\"%s\",\"tdMode\":\"isolated\",\"side\":\"sell\",\"posSide\":\"long\"," +
+                "{\"instId\":\"%s\",\"tdMode\":\"%s\",\"side\":\"sell\",\"posSide\":\"long\"," +
                 "\"ordType\":\"market\",\"sz\":\"%s\"}",
-                instId, quantity.toPlainString());
+                instId, okxMarginMode(), quantity.toPlainString());
 
         Request request = buildSignedRequest("POST", path, bodyStr);
         try (Response response = httpClient.newCall(request).execute()) {
@@ -836,9 +855,12 @@ public class OkxClient implements ExchangeClient {
             JsonNode json = mapper.readTree(body);
             JsonNode data = json.get("data");
             if (data != null && data.size() > 0) {
-                for (JsonNode balance : data) {
-                    if ("USDT".equalsIgnoreCase(balance.path("ccy").asText())) {
-                        return readDecimal(balance, "availBal", "0");
+                JsonNode details = data.get(0).get("details");
+                if (details != null) {
+                    for (JsonNode detail : details) {
+                        if ("USDT".equalsIgnoreCase(detail.path("ccy").asText())) {
+                            return readDecimal(detail, "availBal", "0");
+                        }
                     }
                 }
             }
