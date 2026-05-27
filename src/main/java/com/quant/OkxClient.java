@@ -599,27 +599,7 @@ public class OkxClient implements ExchangeClient {
             log.info("[模拟模式] OKX 合约做空 {} 数量 {}", symbol, quantity);
             return "OKX_SIM_" + System.currentTimeMillis();
         }
-        if (!Config.SIMULATION_MODE) {
-            return placeSwapMarketOrder(symbol, quantity, "sell", "short", false);
-        }
-
-        String instId = toOkxInstId(symbol);
-        String path = "/api/v5/trade/order";
-        // OKX 合约下单数量单位是"张"，1张 = 合约乘数（sz 字段）
-        // 这里假设已提前处理好，quantity 为张数
-        String bodyStr = String.format(
-                "{\"instId\":\"%s\",\"tdMode\":\"%s\",\"side\":\"sell\",\"posSide\":\"short\"," +
-                "\"ordType\":\"market\",\"sz\":\"%s\"}",
-                instId, okxMarginMode(), quantity.toPlainString());
-
-        Request request = buildSignedRequest("POST", path, bodyStr);
-        try (Response response = httpClient.newCall(request).execute()) {
-            String body = checkResponse(response, "合约做空");
-            JsonNode json = mapper.readTree(body);
-            String ordId = json.get("data").get(0).get("ordId").asText();
-            log.info("✅ OKX 合约做空成功: orderId={}, sz={}", ordId, quantity);
-            return ordId;
-        }
+        return placeSwapMarketOrder(symbol, quantity, "sell", "short", false);
     }
 
     /**
@@ -633,25 +613,7 @@ public class OkxClient implements ExchangeClient {
             log.info("[模拟模式] OKX 平空 {} 数量 {}", symbol, quantity);
             return "OKX_SIM_CLOSE_" + System.currentTimeMillis();
         }
-        if (!Config.SIMULATION_MODE) {
-            return placeSwapMarketOrder(symbol, quantity, "buy", "short", true);
-        }
-
-        String instId = toOkxInstId(symbol);
-        String path = "/api/v5/trade/order";
-        String bodyStr = String.format(
-                "{\"instId\":\"%s\",\"tdMode\":\"%s\",\"side\":\"buy\",\"posSide\":\"short\"," +
-                "\"ordType\":\"market\",\"sz\":\"%s\"}",
-                instId, okxMarginMode(), quantity.toPlainString());
-
-        Request request = buildSignedRequest("POST", path, bodyStr);
-        try (Response response = httpClient.newCall(request).execute()) {
-            String body = checkResponse(response, "平合约空单");
-            JsonNode json = mapper.readTree(body);
-            String ordId = json.get("data").get(0).get("ordId").asText();
-            log.info("✅ OKX 平空成功: orderId={}", ordId);
-            return ordId;
-        }
+        return placeSwapMarketOrder(symbol, quantity, "buy", "short", true);
     }
 
     /**
@@ -664,25 +626,7 @@ public class OkxClient implements ExchangeClient {
             log.info("[模拟模式] OKX 合约做多 {} 数量 {}", symbol, quantity);
             return "OKX_SIM_LONG_" + System.currentTimeMillis();
         }
-        if (!Config.SIMULATION_MODE) {
-            return placeSwapMarketOrder(symbol, quantity, "buy", "long", false);
-        }
-
-        String instId = toOkxInstId(symbol);
-        String path = "/api/v5/trade/order";
-        String bodyStr = String.format(
-                "{\"instId\":\"%s\",\"tdMode\":\"%s\",\"side\":\"buy\",\"posSide\":\"long\"," +
-                "\"ordType\":\"market\",\"sz\":\"%s\"}",
-                instId, okxMarginMode(), quantity.toPlainString());
-
-        Request request = buildSignedRequest("POST", path, bodyStr);
-        try (Response response = httpClient.newCall(request).execute()) {
-            String body = checkResponse(response, "合约做多");
-            JsonNode json = mapper.readTree(body);
-            String ordId = json.get("data").get(0).get("ordId").asText();
-            log.info("✅ OKX 合约做多成功: orderId={}, sz={}", ordId, quantity);
-            return ordId;
-        }
+        return placeSwapMarketOrder(symbol, quantity, "buy", "long", false);
     }
 
     /**
@@ -695,25 +639,7 @@ public class OkxClient implements ExchangeClient {
             log.info("[模拟模式] OKX 平多 {} 数量 {}", symbol, quantity);
             return "OKX_SIM_CLOSE_LONG_" + System.currentTimeMillis();
         }
-        if (!Config.SIMULATION_MODE) {
-            return placeSwapMarketOrder(symbol, quantity, "sell", "long", true);
-        }
-
-        String instId = toOkxInstId(symbol);
-        String path = "/api/v5/trade/order";
-        String bodyStr = String.format(
-                "{\"instId\":\"%s\",\"tdMode\":\"%s\",\"side\":\"sell\",\"posSide\":\"long\"," +
-                "\"ordType\":\"market\",\"sz\":\"%s\"}",
-                instId, okxMarginMode(), quantity.toPlainString());
-
-        Request request = buildSignedRequest("POST", path, bodyStr);
-        try (Response response = httpClient.newCall(request).execute()) {
-            String body = checkResponse(response, "平合约多单");
-            JsonNode json = mapper.readTree(body);
-            String ordId = json.get("data").get(0).get("ordId").asText();
-            log.info("✅ OKX 平多成功: orderId={}", ordId);
-            return ordId;
-        }
+        return placeSwapMarketOrder(symbol, quantity, "sell", "long", true);
     }
 
     /**
@@ -815,20 +741,25 @@ public class OkxClient implements ExchangeClient {
     public BigDecimal getBalance() throws IOException {
         if (Config.SIMULATION_MODE) return this.simulatedBalance;
 
-        String path = "/api/v5/asset/balances?ccy=USDT";
+        String path = "/api/v5/account/balance?ccy=USDT";
         Request request = buildSignedRequest("GET", path, "");
         try (Response response = httpClient.newCall(request).execute()) {
             String body = checkResponse(response, "查询余额");
             JsonNode json = mapper.readTree(body);
-            // details[0].availBal
-            JsonNode details = json.get("data").get(0).get("details");
-            for (JsonNode detail : details) {
-                if ("USDT".equals(detail.get("ccy").asText())) {
-                    BigDecimal bal = new BigDecimal(detail.get("availBal").asText());
-                    log.info("💰 OKX 可用余额: {} USDT", bal.setScale(2, RoundingMode.HALF_UP));
-                    return bal;
+            JsonNode data = json.get("data");
+            if (data != null && data.size() > 0) {
+                JsonNode details = data.get(0).get("details");
+                if (details != null) {
+                    for (JsonNode detail : details) {
+                        if ("USDT".equalsIgnoreCase(detail.path("ccy").asText())) {
+                            BigDecimal bal = readDecimal(detail, "availBal", "0");
+                            log.info("💰 OKX 可用余额: {} USDT", bal.setScale(2, RoundingMode.HALF_UP));
+                            return bal;
+                        }
+                    }
                 }
             }
+            log.warn("⚠️ 未获取到 OKX 余额，返回 0");
             return BigDecimal.ZERO;
         }
     }

@@ -305,11 +305,22 @@ public class FundingArbitrageBot {
         int utcMinute = utcNow.getMinute();
 
         // Bug-1修复: 只在结算窗口的前 15 分钟内执行，且每个窗口只结算一次
-        if (Config.FUNDING_HOURS_UTC.contains(utcHour) && utcMinute < 15) {
+        // 关键修复：先标记已结算，再执行结算，防止异常导致重复结算
+        if (Config.FUNDING_HOURS_UTC.contains(utcHour) && utcMinute >= 0 && utcMinute < 15) {
             if (lastSettledHourUtc != utcHour) {
+                // 先标记已结算（防止重复进入）
+                lastSettledHourUtc = utcHour;
                 log.info("💰 检测到资金费结算窗口 UTC {}:00，开始结算...", utcHour);
+
+                // 执行结算
                 settleFundingFee();
-                lastSettledHourUtc = utcHour;  // 标记已结算，本窗口不再重复
+
+                // 结算完成后立即持久化状态（包含lastSettledHourUtc）
+                persistence.saveState(positions, totalPnl, totalTrades,
+                        lastFundingIncomeQueryTime, new HashMap<>(lastFundingIncomeQueryTimes),
+                        lastSettledHourUtc);
+
+                log.info("✅ UTC {}:00 资金费结算完成，状态已持久化", utcHour);
             } else {
                 log.debug("⏸️  UTC {}:00 本轮结算已完成，跳过重复结算", utcHour);
             }

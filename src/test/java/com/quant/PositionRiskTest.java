@@ -24,24 +24,31 @@ class PositionRiskTest {
                 BigDecimal.ZERO
         );
 
-        position.updateUnrealizedPnl(new BigDecimal("2950"));
+        // 价格 2950.1 → 亏损 49.9，比例 = 49.9/1000 = 4.99% < 5%，不触发止损
+        position.updateUnrealizedPnl(new BigDecimal("2950.1"));
 
         // 名义价值 3000 USDT，默认杠杆 3 倍 → 保证金 1000 USDT
-        // 亏损 50 USDT → 亏损比例 50/1000 = 5%
-        assertEquals(0, position.getUnrealizedPnl().compareTo(new BigDecimal("-50")));
-        // 根据配置的杠杆计算预期的比例（默认3倍 = -0.05，如果是2倍 = -0.033333）
-        BigDecimal expectedRatio = new BigDecimal("-50").divide(
+        // 亏损 49.9 USDT → 亏损比例 49.9/1000 = 4.99%（略低于5%）
+        assertEquals(0, position.getUnrealizedPnl().compareTo(new BigDecimal("-49.9")));
+        // 根据配置的杠杆计算预期的比例
+        BigDecimal expectedRatio = new BigDecimal("-49.9").divide(
                 new BigDecimal("3000").divide(BigDecimal.valueOf(Config.LEVERAGE), 10, java.math.RoundingMode.HALF_UP),
                 6,
                 java.math.RoundingMode.HALF_UP
         );
         assertEquals(0, position.getUnrealizedPnlRatio().compareTo(expectedRatio));
+        // 4.99% < 5%，不应该触发止损
         assertFalse(position.isStopLossTriggered(new BigDecimal("0.05")));
 
+        // 价格 2950 → 亏损 50，比例 = 50/1000 = 5%，刚好触发止损
+        position.updateUnrealizedPnl(new BigDecimal("2950"));
+        assertTrue(position.isStopLossTriggered(new BigDecimal("0.05")));
+
+        // 价格 2949 → 亏损 51，比例 = 5.1%，触发止损
         position.updateUnrealizedPnl(new BigDecimal("2949"));
 
         // 亏损51时，如果是3倍杠杆 = 5.1% 触发；如果是1倍杠杆 = 1.7%，则需要更低的价格才触发
-        // 计算刚好触发止损的价格：亏损 = 3000 * 0.03 / LEVERAGE = 90 / LEVERAGE
+        // 计算刚好触发3%止损的价格：亏损 = 3000 * 0.03 / LEVERAGE = 90 / LEVERAGE
         BigDecimal stopLossAmount = new BigDecimal("3000")
                 .multiply(new BigDecimal("0.03"))
                 .divide(BigDecimal.valueOf(Config.LEVERAGE), 6, java.math.RoundingMode.HALF_UP);

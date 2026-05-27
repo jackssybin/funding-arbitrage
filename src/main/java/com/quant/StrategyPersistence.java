@@ -225,9 +225,12 @@ public class StrategyPersistence {
      * 记录资金费结算
      */
     public void recordFunding(String symbol, BigDecimal earning, BigDecimal rate) {
-        String line = String.format("%s,FUNDING,%s,,,%.6f,%.4f,\n",
+        // 使用正确的BigDecimal格式化，避免负数显示异常（如 .0.000814 而非 -0.000814）
+        String rateStr = rate == null ? "" : rate.setScale(6, RoundingMode.HALF_UP).toPlainString();
+        String earningStr = earning == null ? "" : earning.setScale(4, RoundingMode.HALF_UP).toPlainString();
+        String line = String.format("%s,FUNDING,%s,,,%s,%s,\n",
                 LocalDateTime.now().format(dtf),
-                symbol, rate, earning);
+                symbol, rateStr, earningStr);
         appendToCsv(line);
     }
 
